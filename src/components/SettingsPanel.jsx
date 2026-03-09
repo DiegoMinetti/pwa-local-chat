@@ -23,6 +23,7 @@ import {
   Typography,
 } from "@mui/material";
 import { AVAILABLE_MODELS, DEFAULT_CONFIG } from "../lib/chatbot";
+import { isModelCompatible } from "../lib/capabilities";
 
 function SliderRow({ label, hint, value, ...rest }) {
   return (
@@ -45,7 +46,7 @@ function SliderRow({ label, hint, value, ...rest }) {
   );
 }
 
-export default function SettingsPanel({ open, onClose, config, onApply, engineLoading }) {
+export default function SettingsPanel({ open, onClose, config, onApply, engineLoading, deviceCapabilities }) {
   const [draft, setDraft] = useState(config);
   const [jsonValid, setJsonValid] = useState(true);
 
@@ -128,20 +129,40 @@ export default function SettingsPanel({ open, onClose, config, onApply, engineLo
                 value={draft.modelId}
                 onChange={(e) => set("modelId", e.target.value)}
               >
-                {AVAILABLE_MODELS.map((m) => (
-                  <MenuItem key={m.id} value={m.id}>
-                    <Box>
-                      <Typography variant="body2" fontWeight={500}>
-                        {m.label}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {m.size}
-                      </Typography>
-                    </Box>
-                  </MenuItem>
-                ))}
+                {AVAILABLE_MODELS.map((m) => {
+                  const compatible = deviceCapabilities 
+                    ? isModelCompatible(m.id, deviceCapabilities) 
+                    : true;
+                  
+                  return (
+                    <MenuItem key={m.id} value={m.id} disabled={!compatible}>
+                      <Box>
+                        <Typography 
+                          variant="body2" 
+                          fontWeight={500}
+                          sx={{ opacity: compatible ? 1 : 0.5 }}
+                        >
+                          {m.label} {!compatible && "⚠️"}
+                        </Typography>
+                        <Typography 
+                          variant="caption" 
+                          color={compatible ? "text.secondary" : "error"}
+                        >
+                          {m.size}
+                          {!compatible && " — Requiere más memoria"}
+                        </Typography>
+                      </Box>
+                    </MenuItem>
+                  );
+                })}
               </Select>
             </FormControl>
+            {deviceCapabilities && (
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, display: "block" }}>
+                Memoria del dispositivo: ~{deviceCapabilities.estimatedMemoryGB} GB
+                {deviceCapabilities.isMobile && " (móvil)"}
+              </Typography>
+            )}
           </Box>
 
           <Divider />

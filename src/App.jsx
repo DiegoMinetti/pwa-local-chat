@@ -48,14 +48,15 @@ export default function App() {
   const [messages, setMessages] = useState([
     makeMsg(
       "Bot",
-      "¡Hola! Estoy cargando la IA. Podés escribir tu consulta ahora y la responderé en cuanto esté lista."
+      "¡Hola! Seleccioná un modelo en configuración para empezar."
     ),
   ]);
   const [question, setQuestion] = useState("");
-  const [downloading, setDownloading] = useState(true);
+  const [downloading, setDownloading] = useState(false);
   const [downloadPct, setDownloadPct] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [deviceCapabilities, setDeviceCapabilities] = useState(null);
   const [config, setConfig] = useState(() => {
     // Load saved config from localStorage
     try {
@@ -220,23 +221,55 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const snapshot = configRef.current; // snapshot config at effect-run time
+
+    async function checkCapabilities() {
+      const support = await assessBrowserSupport();
+      if (cancelled) return;
+      
+      if (!support.supported) {
+        setError(support.message);
+        setMessages([makeMsg("Bot", `Error: ${support.message}`)]);
+        return;
+      }
+      
+      setDeviceCapabilities(support.deviceCapabilities);
+      
+      // Load business info
+      try {
+        const businessDoc = await loadBusinessDocument();
+        setConfig((c) => {
+          const updated = { ...c, businessInfo: businessDoc };
+          try {
+            localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(updated));
+          } catch (err) {
+            console.warn('Failed to save config:', err);
+          }
+          return updated;
+        });
+      } catch (err) {
+        console.error('Failed to load business document:', err);
+      }
+    }
+
+    checkCapabilities();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Bootstrap engine only when user applies settings with a valid model
+  useEffect(() => {
+    if (bootKey === 0) return; // Don't run on initial mount
+    
+    let cancelled = false;
+    const snapshot = configRef.current;
 
     async function bootstrap() {
-      const support = await assessBrowserSupport();
-      if (!support.supported) throw new Error(support.message);
-
-      const businessDoc = await loadBusinessDocument();
-      setConfig((c) => {
-        const updated = { ...c, businessInfo: businessDoc };
-        // Save to localStorage
-        try {
-          localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(updated));
-        } catch (err) {
-          console.warn('Failed to save config:', err);
-        }
-        return updated;
-      });
+      setDownloading(true);
+      setDownloadPct(null);
+      setError("");
+      setMessages([makeMsg("Bot", "Cargando modelo, por favor esperá un momento…")]);
 
       const webllm = await import("@mlc-ai/web-llm");
       const engine = await createEngine(
@@ -284,7 +317,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [processQueue, bootKey, isFirstBootstrap]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [processQueue, bootKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // submitQuestion handles both quick (text-search) and queued (model) paths.
   function submitQuestion(text) {
@@ -337,15 +370,20 @@ export default function App() {
     
     setConfig(newConfig);
     setSettingsOpen(false);
+    
     if (needsRestart) {
       engineRef.current = null;
       processingRef.current = false;
       pendingQueueRef.current = [];
-      setDownloading(true);
-      setDownloadPct(null);
-      setError("");
-      setMessages([makeMsg("Bot", "Cargando nuevo modelo, por favor esperá un momento…")]);
-      setBootKey((k) => k + 1);
+      setBootKey((k) => k + 1); // Trigger bootstrap
+    } else if (bootKey === 0) {
+      // First time applying settings, trigger initial bootstrap
+      setBootKey(1);
+    }
+    
+    // Mark first bootstrap as complete
+    if (isFirstBootstrap) {
+      setIsFirstBootstrap(false);
     }
   }
 
@@ -480,6 +518,7 @@ export default function App() {
         config={config}
         onApply={applySettings}
         engineLoading={downloading}
+        deviceCapabilities={deviceCapabilities}
       />
     </Box>
   );

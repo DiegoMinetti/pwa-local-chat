@@ -46,13 +46,15 @@ describe("assessBrowserSupport", () => {
       navigatorRef: {
         gpu: {
           requestAdapter: vi.fn().mockResolvedValue({})
-        }
+        },
+        userAgent: "Mozilla/5.0"
       }
     });
 
-    expect(result).toEqual({
-      supported: true,
-      message: "Entorno WebGPU listo."
-    });
+    expect(result.supported).toBe(true);
+    expect(result.message).toBe("Entorno WebGPU listo.");
+    expect(result.deviceCapabilities).toBeDefined();
+    expect(result.deviceCapabilities.isMobile).toBe(false);
+    expect(result.deviceCapabilities.estimatedMemoryGB).toBeGreaterThan(0);
   });
 });
