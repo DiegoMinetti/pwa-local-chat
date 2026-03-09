@@ -1,0 +1,57 @@
+import { useEffect, useRef } from "react";
+import SendRoundedIcon from "@mui/icons-material/SendRounded";
+import { CircularProgress, IconButton, Stack, TextField, Tooltip } from "@mui/material";
+
+export default function ChatComposer({ value, downloading, busy, onChange, onSubmit }) {
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  function handleKeyDown(event) {
+    if (event.key === "Enter" && !event.shiftKey && value.trim()) {
+      event.preventDefault();
+      onSubmit(event);
+    }
+  }
+
+  const canSend = value.trim().length > 0;
+
+  return (
+    <Stack component="form" direction="row" gap={1} onSubmit={onSubmit}>
+      <TextField
+        fullWidth
+        inputRef={inputRef}
+        label={downloading ? "Escribí tu consulta (se enviará cuando la IA esté lista)" : "Pregunta del cliente"}
+        placeholder="Consultá horarios, dirección, pagos o promociones"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={handleKeyDown}
+      />
+      <Tooltip title={downloading ? "Se enviará cuando la IA esté lista" : "Enviar (Enter)"} placement="top">
+        <span style={{ alignSelf: "center", flexShrink: 0 }}>
+          <IconButton
+            aria-label="Enviar"
+            disabled={!canSend}
+            type="submit"
+            sx={{
+              width: 48,
+              height: 48,
+              bgcolor: canSend ? "primary.main" : "action.disabledBackground",
+              color: canSend ? "white" : "action.disabled",
+              borderRadius: "50%",
+              "&:hover": { bgcolor: "primary.dark", color: "white" },
+            }}
+          >
+            {busy && !downloading ? (
+              <CircularProgress size={20} color="inherit" />
+            ) : (
+              <SendRoundedIcon />
+            )}
+          </IconButton>
+        </span>
+      </Tooltip>
+    </Stack>
+  );
+}

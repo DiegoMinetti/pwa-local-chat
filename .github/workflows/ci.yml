@@ -23,17 +23,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Validate JavaScript
-        run: |
-          node --check app.js
-          node --check service-worker.js
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Validate manifest
-        run: python3 -m json.tool manifest.json > /dev/null
+      - name: Run tests
+        run: npm test -- --run
+
+      - name: Build app
+        run: npm run build
 
       - name: Extract Docker metadata
         id: meta
