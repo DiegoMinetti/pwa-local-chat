@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, afterEach } from "vitest";
 import App from "./App";
 
 vi.mock("@mlc-ai/web-llm", () => ({}));
@@ -24,6 +24,20 @@ import { createEngine, loadBusinessDocument, streamAssistantReply } from "./lib/
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    
+    // Mock localStorage to have saved config (not first load)
+    const mockConfig = {
+      modelId: "Phi-3.5-mini-instruct-q4f16_1-MLC",
+      systemPrompt: "You are a helpful assistant.",
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 256,
+      repetitionPenalty: 1.0,
+      contextWindowSize: 4096,
+      businessInfo: ""
+    };
+    localStorage.setItem('cafe-central-config', JSON.stringify(mockConfig));
+    
     assessBrowserSupport.mockResolvedValue({ supported: true, message: "ok" });
     loadBusinessDocument.mockResolvedValue("Horario: 8 a 18");
     createEngine.mockResolvedValue({});
@@ -32,6 +46,10 @@ describe("App", () => {
       onToken(reply);
       return reply;
     });
+  });
+
+  afterEach(() => {
+    localStorage.clear();
   });
 
   it("muestra el encabezado principal", async () => {

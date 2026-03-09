@@ -15,10 +15,15 @@ import ChatComposer from "./components/ChatComposer";
 import MessageList from "./components/MessageList";
 import SettingsPanel from "./components/SettingsPanel";
 import StatusPanel from "./components/StatusPanel";
+import TokenCounter from "./components/TokenCounter";
 import { assessBrowserSupport } from "./lib/capabilities";
 import {
   DEFAULT_CONFIG,
+  calculateContextTokens,
+  calculateMessagesTokens,
   createEngine,
+  estimateTokens,
+  generateChatSummary,
   loadBusinessDocument,
   quickLookup,
   streamAssistantReply,
@@ -38,6 +43,7 @@ export default function App() {
   const engineRef = useRef(null);
   const pendingQueueRef = useRef([]); // [{ question, botMsgId }]
   const processingRef = useRef(false);
+  const inputRef = useRef(null); // Chat input reference for global keyboard capture
 
   const [messages, setMessages] = useState([
     makeMsg(
@@ -65,11 +71,98 @@ export default function App() {
     return DEFAULT_CONFIG;
   });
   const [bootKey, setBootKey] = useState(0);
+  const [isFirstBootstrap, setIsFirstBootstrap] = useState(() => {
+    try {
+      const saved = localStorage.getItem(CONFIG_STORAGE_KEY);
+      return !saved; // true if no saved config
+    } catch {
+      return true;
+    }
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chatHistory, setChatHistory] = useState("");
+  const [tokenInfo, setTokenInfo] = useState({ contextTokens: 0, responseTokens: 0, totalTokens: 0 });
 
   // Always-current config ref — lets callbacks read latest config without stale closures.
   const configRef = useRef(DEFAULT_CONFIG);
   configRef.current = config;
+  
+  // Always-current chat history ref
+  const chatHistoryRef = useRef("");
+  chatHistoryRef.current = chatHistory;
+
+  // Open settings panel on first load (no saved config)
+  useEffect(() => {
+    if (isFirstBootstrap) {
+      setSettingsOpen(true);
+    }
+  }, [isFirstBootstrap]);
+
+  // Update token info when question or config changes
+  useEffect(() => {
+    const tokens = calculateMessagesTokens({
+      systemPrompt: configRef.current.systemPrompt,
+      businessInfo: configRef.current.businessInfo,
+      question,
+      chatHistory,
+      additionalContexts: configRef.current.additionalContexts || [],
+      responseLength: configRef.current.maxTokens, // potential max response
+    });
+    setTokenInfo(tokens);
+  }, [question, config, chatHistory]);
+
+  // Global keyboard capture: focus input and capture first keystroke if not already focused
+  useEffect(() => {
+    function handleGlobalKeyDown(event) {
+      // Ignore if input is already focused or settings are open
+      if (document.activeElement === inputRef.current || settingsOpen) {
+        return;
+      }
+
+      // Ignore modifier keys and special keys
+      if (
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        event.key === "Escape" ||
+        event.key === "Tab" ||
+        event.key === "Shift" ||
+        event.key === "Control" ||
+        event.key === "Alt" ||
+        event.key === "Meta"
+      ) {
+        return;
+      }
+
+      // Ignore if clicking on an input-like element
+      const activeElement = document.activeElement;
+      if (
+        activeElement?.tagName === "INPUT" ||
+        activeElement?.tagName === "TEXTAREA" ||
+        activeElement?.contentEditable === "true"
+      ) {
+        return;
+      }
+
+      // Focus input and insert character (but not Enter, which triggers submit)
+      if (event.key === "Enter") {
+        event.preventDefault();
+        inputRef.current?.focus();
+        return;
+      }
+
+      event.preventDefault();
+      inputRef.current?.focus();
+
+      // Simulate the keystroke in the input by updating the question state
+      if (inputRef.current) {
+        setQuestion((prev) => prev + event.key);
+      }
+    }
+
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [settingsOpen]);
 
   function updateMsg(id, patch) {
     setMessages((current) =>
@@ -88,15 +181,28 @@ export default function App() {
 
       try {
         // Accumulate text without showing intermediate updates
+        const config = {
+          ...configRef.current,
+          chatHistory: chatHistoryRef.current,
+        };
+        
         const finalText = await streamAssistantReply(
           engineRef.current,
           configRef.current.businessInfo,
           q,
           () => {}, // no-op callback — don't update during streaming
-          configRef.current
+          config
         );
         // Show complete text at once
         updateMsg(botMsgId, { text: finalText, streaming: false });
+        
+        // Update chat history after bot responds
+        setMessages((current) => {
+          const newHistory = generateChatSummary(current);
+          setChatHistory(newHistory);
+          chatHistoryRef.current = newHistory;
+          return current;
+        });
       } catch (err) {
         console.error("Reply error:", err);
         updateMsg(botMsgId, {
@@ -153,6 +259,10 @@ export default function App() {
 
       engineRef.current = engine;
       setDownloading(false);
+      if (isFirstBootstrap) {
+        setIsFirstBootstrap(false);
+        setSettingsOpen(false);
+      }
       setMessages((current) => [
         ...current,
         makeMsg("Bot", "¡Listo! Soy el asistente de Cafe Central. ¿En qué puedo ayudarte?"),
@@ -174,7 +284,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [processQueue, bootKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [processQueue, bootKey, isFirstBootstrap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // submitQuestion handles both quick (text-search) and queued (model) paths.
   function submitQuestion(text) {
@@ -337,6 +447,7 @@ export default function App() {
           {/* Composer */}
           <Box sx={{ px: { xs: 2, md: 3 }, pt: 1.5, pb: { xs: 2, md: 2.25 }, flexShrink: 0 }}>
             <ChatComposer
+              ref={inputRef}
               busy={busy}
               downloading={downloading}
               onChange={setQuestion}
@@ -344,6 +455,19 @@ export default function App() {
               onQuickQuestion={submitQuestion}
               value={question}
             />
+            
+            {/* Token Counter */}
+            {(tokenInfo.contextTokens > 0 || tokenInfo.responseTokens > 0) && (
+              <Box sx={{ mt: 1.5 }}>
+                <TokenCounter
+                  contextTokens={tokenInfo.contextTokens}
+                  responseTokens={tokenInfo.responseTokens}
+                  totalTokens={tokenInfo.totalTokens}
+                  maxTokens={config.contextWindowSize}
+                />
+              </Box>
+            )}
+            
             <Typography color="text.secondary" variant="caption" sx={{ display: "block", mt: 0.75 }}>
               Requiere HTTPS o localhost para WebGPU. Usá GitHub Pages para producción.
             </Typography>

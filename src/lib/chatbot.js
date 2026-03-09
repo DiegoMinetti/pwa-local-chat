@@ -55,9 +55,33 @@ export const DEFAULT_CONFIG = {
   repetitionPenalty: 1.1,
   contextWindowSize: 4096,
   businessInfo: "",
+  additionalContexts: [], // [{ name: string, content: string }, ...]
 };
 
-export function buildMessages({ businessInfo, question, systemPrompt = SYSTEM_PROMPT }) {
+/**
+ * Estimate token count using character-based approximation.
+ * Average: ~1 token per 4 characters for Spanish.
+ */
+export function estimateTokens(text) {
+  if (!text) return 0;
+  // Spanish typically has ~0.25 tokens per character
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Calculate total tokens for all contexts and messages.
+ */
+export function calculateContextTokens({ businessInfo = "", chatHistory = "", additionalContexts = [] }) {
+  let total = 0;
+  if (businessInfo) total += estimateTokens(businessInfo);
+  if (chatHistory) total += estimateTokens(chatHistory);
+  for (const ctx of additionalContexts) {
+    if (ctx.content) total += estimateTokens(ctx.content);
+  }
+  return total;
+}
+
+export function buildMessages({ businessInfo, question, systemPrompt = SYSTEM_PROMPT, chatHistory = "", additionalContexts = [] }) {
   // Minify JSON to reduce token count; fall back to original if not valid JSON.
   let compactInfo = businessInfo.trim();
   try {
@@ -65,11 +89,34 @@ export function buildMessages({ businessInfo, question, systemPrompt = SYSTEM_PR
   } catch {
     // plain-text format — use as-is
   }
+  
+  let userContent = `Contexto del negocio:\n${compactInfo}`;
+  
+  // Include additional contexts
+  for (const ctx of additionalContexts) {
+    if (ctx.content?.trim()) {
+      let compactCtx = ctx.content.trim();
+      try {
+        compactCtx = JSON.stringify(JSON.parse(compactCtx));
+      } catch {
+        // plain-text — use as-is
+      }
+      userContent += `\n\nContexto: ${ctx.name}\n${compactCtx}`;
+    }
+  }
+  
+  // Include chat history if available
+  if (chatHistory.trim()) {
+    userContent += `\n\nHistorial de conversación:\n${chatHistory}`;
+  }
+  
+  userContent += `\n\nPregunta: ${question.trim()}`;
+  
   return [
     { role: "system", content: systemPrompt },
     {
       role: "user",
-      content: `Contexto del negocio:\n${compactInfo}\n\nPregunta: ${question.trim()}`,
+      content: userContent,
     },
   ];
 }
@@ -252,10 +299,12 @@ export async function streamAssistantReply(engine, businessInfo, question, onTok
     topP = DEFAULT_CONFIG.topP,
     maxTokens = DEFAULT_CONFIG.maxTokens,
     repetitionPenalty = DEFAULT_CONFIG.repetitionPenalty,
+    chatHistory = "",
+    additionalContexts = [],
   } = config;
 
   const stream = await engine.chat.completions.create({
-    messages: buildMessages({ businessInfo, question, systemPrompt }),
+    messages: buildMessages({ businessInfo, question, systemPrompt, chatHistory, additionalContexts }),
     stream: true,
     temperature,
     top_p: topP,
@@ -282,10 +331,12 @@ export async function getAssistantReply(engine, businessInfo, question, config =
     topP = DEFAULT_CONFIG.topP,
     maxTokens = DEFAULT_CONFIG.maxTokens,
     repetitionPenalty = DEFAULT_CONFIG.repetitionPenalty,
+    chatHistory = "",
+    additionalContexts = [],
   } = config;
 
   const response = await engine.chat.completions.create({
-    messages: buildMessages({ businessInfo, question, systemPrompt }),
+    messages: buildMessages({ businessInfo, question, systemPrompt, chatHistory, additionalContexts }),
     temperature,
     top_p: topP,
     repetition_penalty: repetitionPenalty,
@@ -293,4 +344,60 @@ export async function getAssistantReply(engine, businessInfo, question, config =
     stop: ["\nContexto del negocio:", "\nPregunta:", "\nCliente:"],
   });
   return sanitizeAssistantReply(response.choices?.[0]?.message?.content);
+}
+
+/**
+ * Calculate total tokens used in current and potential response.
+ */
+export function calculateMessagesTokens({
+  systemPrompt = SYSTEM_PROMPT,
+  businessInfo = "",
+  question = "",
+  chatHistory = "",
+  additionalContexts = [],
+  responseLength = 0, // tokens in the response
+}) {
+  const messages = buildMessages({
+    businessInfo,
+    question,
+    systemPrompt,
+    chatHistory,
+    additionalContexts,
+  });
+
+  let totalTokens = 0;
+  for (const msg of messages) {
+    totalTokens += estimateTokens(msg.content);
+  }
+
+  return {
+    contextTokens: totalTokens,
+    responseTokens: responseLength,
+    totalTokens: totalTokens + responseLength,
+  };
+}
+
+/**
+ * Generate a condensed summary of the chat history for context.
+ */
+export function generateChatSummary(messages) {
+  if (messages.length <= 2) return ""; // Minimal history
+  
+  // Get the last few exchanges (user + bot pairs) to avoid token bloat
+  const exchanges = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.author === "Bot" && !msg.pending && !msg.streaming) {
+      // Found a bot response, get the preceding user message
+      for (let j = i - 1; j >= 0; j--) {
+        if (messages[j].author === "Cliente") {
+          exchanges.unshift(`- Cliente: ${messages[j].text}\n  Bot: ${msg.text}`);
+          break;
+        }
+      }
+      if (exchanges.length >= 4) break; // Keep last 4 exchanges (8 messages total)
+    }
+  }
+  
+  return exchanges.length > 0 ? exchanges.join("\n") : "";
 }

@@ -4,6 +4,8 @@ import RestartAltRoundedIcon from "@mui/icons-material/RestartAltRounded";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ErrorRoundedIcon from "@mui/icons-material/ErrorRounded";
+import AddRoundedIcon from "@mui/icons-material/AddRounded";
+import DeleteRoundedIcon from "@mui/icons-material/DeleteRounded";
 import {
   Box,
   Button,
@@ -250,7 +252,95 @@ export default function SettingsPanel({ open, onClose, config, onApply, engineLo
 
           <Divider />
 
-          {/* MOTOR */}
+          {/* CONTEXTOS ADICIONALES */}
+          <Box>
+            <Stack direction="row" spacing={1} alignItems="center" mb={1.5}>
+              <Typography variant="overline" color="text.secondary">
+                Contextos adicionales
+              </Typography>
+              <Tooltip title="Agregar nuevo contexto (ej: precios, mesas disponibles)">
+                <IconButton
+                  size="small"
+                  onClick={() => {
+                    const newContext = { name: "Nuevo contexto", content: "" };
+                    set("additionalContexts", [...(draft.additionalContexts || []), newContext]);
+                  }}
+                >
+                  <AddRoundedIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+
+            {draft.additionalContexts?.length > 0 ? (
+              <Stack spacing={2}>
+                {draft.additionalContexts.map((ctx, idx) => (
+                  <Box
+                    key={idx}
+                    sx={{
+                      p: 1.5,
+                      border: "1px solid",
+                      borderColor: "divider",
+                      borderRadius: 1,
+                      bgcolor: "action.hover",
+                    }}
+                  >
+                    <Stack spacing={1}>
+                      <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                        <TextField
+                          size="small"
+                          label="Nombre del contexto"
+                          value={ctx.name}
+                          onChange={(e) => {
+                            const updated = [...draft.additionalContexts];
+                            updated[idx].name = e.target.value;
+                            set("additionalContexts", updated);
+                          }}
+                          placeholder="ej: Precios, Mesas"
+                          sx={{ flex: 1 }}
+                        />
+                        <Tooltip title="Eliminar contexto">
+                          <IconButton
+                            size="small"
+                            onClick={() => {
+                              set(
+                                "additionalContexts",
+                                draft.additionalContexts.filter((_, i) => i !== idx)
+                              );
+                            }}
+                          >
+                            <DeleteRoundedIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </Stack>
+                      <TextField
+                        multiline
+                        rows={4}
+                        fullWidth
+                        size="small"
+                        label="Contenido (JSON o texto)"
+                        value={ctx.content}
+                        onChange={(e) => {
+                          const updated = [...draft.additionalContexts];
+                          updated[idx].content = e.target.value;
+                          set("additionalContexts", updated);
+                        }}
+                        placeholder="{}"
+                        inputProps={{
+                          style: { fontFamily: "monospace", fontSize: "0.85rem" },
+                        }}
+                      />
+                    </Stack>
+                  </Box>
+                ))}
+              </Stack>
+            ) : (
+              <Typography variant="caption" color="text.secondary">
+                Sin contextos adicionales. Agrega uno con el botón +.
+              </Typography>
+            )}
+          </Box>
+
+          <Divider />
           <Box>
             <Typography variant="overline" color="text.secondary" display="block" mb={1}>
               Motor

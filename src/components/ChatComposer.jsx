@@ -1,13 +1,16 @@
-import { useEffect, useRef } from "react";
+import { forwardRef, useEffect, useRef } from "react";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
 import { CircularProgress, IconButton, Stack, TextField, Tooltip } from "@mui/material";
 
-export default function ChatComposer({ value, downloading, busy, onChange, onSubmit }) {
+export default forwardRef(function ChatComposer({ value, downloading, busy, onChange, onSubmit }, ref) {
   const inputRef = useRef(null);
-
+  
+  // Expose input element to parent via ref
   useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+    if (ref) {
+      ref.current = inputRef.current;
+    }
+  }, [ref]);
 
   function handleKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey && value.trim()) {
@@ -54,4 +57,4 @@ export default function ChatComposer({ value, downloading, busy, onChange, onSub
       </Tooltip>
     </Stack>
   );
-}
+});
