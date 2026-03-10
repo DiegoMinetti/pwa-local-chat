@@ -2,15 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BUSINESS_DOC_PATH,
   FALLBACK_REPLY,
+  fetchDynamicContexts,
   MODEL_ID,
+  normalizeDynamicSources,
   SUGGESTED_QUESTIONS,
   SYSTEM_PROMPT,
   buildMessages,
+  computeHistoryBudget,
   createEngine,
+  generateChatSummary,
   getAssistantReply,
   loadBusinessDocument,
   quickLookup,
-  sanitizeAssistantReply
+  sanitizeAssistantReply,
+  toDynamicContext
 } from "./chatbot";
 
 describe("chatbot helpers", () => {
@@ -202,6 +207,170 @@ describe("chatbot helpers", () => {
       expect(quickLookup("", "¿Cuál es el horario?")).toBeNull();
       expect(quickLookup(null, "¿Cuál es el horario?")).toBeNull();
       expect(quickLookup("texto plano sin JSON", "¿Cuál es el horario?")).toBeNull();
+    });
+  });
+
+  describe("dynamic API contexts", () => {
+    it("normalizeDynamicSources filtra endpoints inválidos", () => {
+      const normalized = normalizeDynamicSources([
+        { name: "Precios", endpoint: " https://api.local/prices ", enabled: true },
+        { name: "Mesas", endpoint: "https://api.local/tables", enabled: false },
+        { name: "Sin endpoint", endpoint: "" },
+        null,
+      ]);
+
+      expect(normalized).toHaveLength(1);
+      expect(normalized[0]).toEqual({
+        name: "Precios",
+        endpoint: "https://api.local/prices",
+        enabled: true,
+      });
+    });
+
+    it("toDynamicContext agrega metadata updated_at al nombre", () => {
+      const context = toDynamicContext("Precios", {
+        updated_at: "2026-03-10T18:25:00Z",
+        items: [{ id: "latte", price: 3800 }],
+      });
+
+      expect(context.name).toContain("Precios");
+      expect(context.name).toContain("2026-03-10T18:25:00Z");
+      expect(context.content).toContain("latte");
+    });
+
+    it("fetchDynamicContexts devuelve contextos exitosos y errores", async () => {
+      const mockFetch = vi.fn(async (url) => {
+        if (url.includes("prices")) {
+          return {
+            ok: true,
+            json: async () => ({ updated_at: "2026-03-10T18:25:00Z", items: [] }),
+          };
+        }
+
+        return {
+          ok: false,
+          status: 503,
+          json: async () => ({}),
+        };
+      });
+
+      const result = await fetchDynamicContexts(
+        [
+          { name: "Precios", endpoint: "https://api.local/prices", enabled: true },
+          { name: "Mesas", endpoint: "https://api.local/tables", enabled: true },
+        ],
+        mockFetch
+      );
+
+      expect(result.contexts).toHaveLength(1);
+      expect(result.contexts[0].name).toContain("Precios");
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].name).toBe("Mesas");
+    });
+  });
+
+  describe("generateChatSummary", () => {
+    function makeMessages(pairs) {
+      const msgs = [{ id: "0", author: "Bot", text: "Hola, ¿en qué puedo ayudarte?" }];
+      let id = 1;
+      for (const [user, bot] of pairs) {
+        msgs.push({ id: String(id++), author: "Cliente", text: user });
+        msgs.push({ id: String(id++), author: "Bot", text: bot, pending: false, streaming: false });
+      }
+      return msgs;
+    }
+
+    it("devuelve vacío si hay 2 mensajes o menos", () => {
+      expect(generateChatSummary([{ author: "Bot", text: "Hola" }])).toBe("");
+      expect(generateChatSummary(makeMessages([]))).toBe("");
+    });
+
+    it("incluye la última interacción verbatim", () => {
+      const msgs = makeMessages([["¿Cuál es el horario?", "Lunes a viernes de 8 a 20."]]);
+      const summary = generateChatSummary(msgs);
+      expect(summary).toContain("¿Cuál es el horario?");
+      expect(summary).toContain("Lunes a viernes de 8 a 20.");
+    });
+
+    it("extrae el nombre del cliente mencionado", () => {
+      const msgs = makeMessages([
+        ["Me llamo Juan, ¿cuál es el horario?", "Lunes a viernes de 8 a 20."],
+      ]);
+      const summary = generateChatSummary(msgs);
+      expect(summary).toMatch(/Juan/i);
+    });
+
+    it("extrae ítems pedidos por el cliente", () => {
+      const msgs = makeMessages([
+        ["Quiero un café con leche por favor", "¡Claro! Ya te lo traemos."],
+      ]);
+      const summary = generateChatSummary(msgs);
+      expect(summary.toLowerCase()).toContain("café");
+    });
+
+    it("extrae temas consultados y los deduplica", () => {
+      const msgs = makeMessages([
+        ["¿Cuál es el horario?", "Lunes a viernes de 8 a 20."],
+        ["¿Y el teléfono?", "Es el +54 11 4567 8899."],
+        ["¿Cuál es el horario de los sábados?", "Sábados de 9 a 23."],
+      ]);
+      const summary = generateChatSummary(msgs);
+      // "horario" should appear only once in the topics list
+      const topicsLine = summary.split("\n").find((l) => l.includes("Consultó sobre"));
+      const horarioCount = (topicsLine || "").split("horario").length - 1;
+      expect(horarioCount).toBe(1);
+      expect(summary).toContain("teléfono");
+    });
+
+    it("poda tópicos cuando se supera el presupuesto de tokens", () => {
+      const manyPairs = Array.from({ length: 20 }, (_, i) => [
+        `¿Cuál es el horario del día ${i}? Y el teléfono y la dirección y el menú`,
+        `Respuesta ${i}.`,
+      ]);
+      const msgs = makeMessages(manyPairs);
+      const summary = generateChatSummary(msgs, 80); // very tight budget
+      expect(summary.length).toBeGreaterThan(0);
+      // Should never exceed the budget by a large margin
+      // (token estimate: ~chars/4, so 80 tokens ≈ 320 chars)
+      expect(summary.length).toBeLessThan(800);
+    });
+
+    it("siempre preserva la última interacción aunque se pode todo lo demás", () => {
+      const msgs = makeMessages([
+        ["Me llamo Pedro y quiero saber el horario, el teléfono y la dirección", "Respondido."],
+        ["¿Y las formas de pago?", "Efectivo y tarjeta."],
+      ]);
+      const summary = generateChatSummary(msgs, 50); // extremely tight
+      expect(summary).toContain("¿Y las formas de pago?");
+      expect(summary).toContain("Efectivo y tarjeta.");
+    });
+  });
+
+  describe("computeHistoryBudget", () => {
+    it("devuelve al menos 150 tokens incluso cuando el contexto fijo supera la ventana", () => {
+      const budget = computeHistoryBudget({
+        contextWindowSize: 512,           // small window
+        businessInfo: "x".repeat(10000), // ~2500 tokens — far exceeds the window
+        maxTokens: 128,
+        additionalContexts: [],
+      });
+      expect(budget).toBe(150);
+    });
+
+    it("reduce el presupuesto cuando hay contextos adicionales", () => {
+      const base = computeHistoryBudget({ contextWindowSize: 4096, businessInfo: "", additionalContexts: [], maxTokens: 128 });
+      const withExtra = computeHistoryBudget({
+        contextWindowSize: 4096,
+        businessInfo: "",
+        additionalContexts: [{ content: "x".repeat(1600) }], // ~400 tokens
+        maxTokens: 128,
+      });
+      expect(withExtra).toBeLessThan(base);
+    });
+
+    it("usa los valores por defecto de DEFAULT_CONFIG si no se pasan parámetros", () => {
+      const budget = computeHistoryBudget({});
+      expect(budget).toBeGreaterThan(150);
     });
   });
 });

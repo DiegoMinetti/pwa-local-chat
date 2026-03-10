@@ -1,4 +1,12 @@
-export const MODEL_ID = "Phi-3.5-mini-instruct-q4f16_1-MLC";
+import {
+  AVAILABLE_MODELS,
+  DEFAULT_FALLBACK_MODEL_IDS,
+  MODEL_ID,
+  getModelById,
+  getRuntimeLabel,
+} from "./modelCatalog";
+
+export { AVAILABLE_MODELS, MODEL_ID };
 export const BUSINESS_DOC_PATH = "docs/negocio.txt";
 export const FALLBACK_REPLY =
   "Por el momento no tengo esa información, pero con gusto puedo ayudarle con otra consulta sobre Cafe Central.";
@@ -18,36 +26,9 @@ export const SYSTEM_PROMPT = [
   "No incluyas etiquetas, prefijos ni explicaciones meta.",
 ].join("\n");
 
-export const AVAILABLE_MODELS = [
-  {
-    id: "Phi-3.5-mini-instruct-q4f16_1-MLC",
-    label: "Phi-3.5 Mini",
-    size: "2.4 GB — recomendado, buen balance",
-  },
-  {
-    id: "Llama-3.2-1B-Instruct-q4f16_1-MLC",
-    label: "Llama 3.2 1B",
-    size: "0.9 GB — más rápido, respuestas simples",
-  },
-  {
-    id: "Llama-3.2-3B-Instruct-q4f16_1-MLC",
-    label: "Llama 3.2 3B",
-    size: "2.0 GB — mayor calidad",
-  },
-  {
-    id: "gemma-2-2b-it-q4f16_1-MLC",
-    label: "Gemma 2 2B",
-    size: "1.5 GB — Google, muy eficiente",
-  },
-  {
-    id: "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
-    label: "Qwen2.5 1.5B",
-    size: "1.0 GB — rápido, buen español",
-  },
-];
-
 export const DEFAULT_CONFIG = {
   modelId: MODEL_ID,
+  fallbackModelIds: DEFAULT_FALLBACK_MODEL_IDS,
   systemPrompt: SYSTEM_PROMPT,
   temperature: 0.1,
   topP: 0.85,
@@ -56,7 +37,83 @@ export const DEFAULT_CONFIG = {
   contextWindowSize: 4096,
   businessInfo: "",
   additionalContexts: [], // [{ name: string, content: string }, ...]
+  dynamicSources: [], // [{ name, endpoint, enabled }]
 };
+
+/**
+ * Validate and normalize dynamic API source definitions.
+ */
+export function normalizeDynamicSources(sources = []) {
+  if (!Array.isArray(sources)) return [];
+
+  return sources
+    .filter((source) => source && typeof source === "object")
+    .map((source) => ({
+      name: String(source.name || "Fuente en tiempo real").trim() || "Fuente en tiempo real",
+      endpoint: String(source.endpoint || "").trim(),
+      enabled: source.enabled !== false,
+    }))
+    .filter((source) => source.enabled && source.endpoint);
+}
+
+/**
+ * Convert arbitrary API payload into compact JSON text with metadata for prompting.
+ */
+export function toDynamicContext(sourceName, payload) {
+  const isObject = payload && typeof payload === "object" && !Array.isArray(payload);
+  const updatedAt = isObject && payload.updated_at ? String(payload.updated_at) : null;
+
+  return {
+    name: `${sourceName}${updatedAt ? ` (actualizado: ${updatedAt})` : ""}`,
+    content: JSON.stringify(payload),
+  };
+}
+
+/**
+ * Fetch real-time JSON contexts from configured APIs.
+ */
+export async function fetchDynamicContexts(sources, fetchImpl = fetch) {
+  const normalized = normalizeDynamicSources(sources);
+  if (!normalized.length) {
+    return { contexts: [], errors: [] };
+  }
+
+  const results = await Promise.all(
+    normalized.map(async (source) => {
+      try {
+        const response = await fetchImpl(source.endpoint, {
+          method: "GET",
+          headers: { Accept: "application/json" },
+        });
+
+        if (!response.ok) {
+          return {
+            ok: false,
+            name: source.name,
+            error: `HTTP ${response.status}`,
+          };
+        }
+
+        const payload = await response.json();
+        return {
+          ok: true,
+          context: toDynamicContext(source.name, payload),
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          name: source.name,
+          error: error instanceof Error ? error.message : "Error desconocido",
+        };
+      }
+    })
+  );
+
+  return {
+    contexts: results.filter((r) => r.ok).map((r) => r.context),
+    errors: results.filter((r) => !r.ok).map((r) => ({ name: r.name, error: r.error })),
+  };
+}
 
 /**
  * Estimate token count using character-based approximation.
@@ -200,16 +257,154 @@ export async function loadBusinessDocument(fetchImpl = fetch, basePath = import.
   return response.text();
 }
 
-export async function createEngine(
-  webllmModule,
-  onProgress,
-  { modelId = MODEL_ID, contextWindowSize = 4096 } = {}
-) {
-  return webllmModule.CreateMLCEngine(
-    modelId,
-    { initProgressCallback: onProgress, logLevel: "WARN" },
-    { context_window_size: contextWindowSize }
+export async function loadModelRuntimeModule(modelId) {
+  const model = getModelById(modelId);
+  if (!model) {
+    throw new Error(`Modelo no soportado: ${modelId}`);
+  }
+
+  if (model.runtime === "webllm") {
+    return import("@mlc-ai/web-llm");
+  }
+
+  if (model.runtime === "transformers") {
+    return null;
+  }
+
+  throw new Error(`Runtime no soportado: ${model.runtime}`);
+}
+
+function createSingleChunkStream(text) {
+  return (async function* stream() {
+    yield {
+      choices: [{ delta: { content: text } }],
+    };
+  })();
+}
+
+function createWorkerRpc(worker) {
+  let nextRequestId = 1;
+  const pendingRequests = new Map();
+
+  worker.onmessage = (event) => {
+    const { id, type, payload } = event.data || {};
+    if (!pendingRequests.has(id)) return;
+
+    const request = pendingRequests.get(id);
+
+    if (type === "progress") {
+      request.onProgress?.(payload);
+      return;
+    }
+
+    pendingRequests.delete(id);
+
+    if (type === "result") {
+      request.resolve(payload);
+      return;
+    }
+
+    if (type === "error") {
+      request.reject(new Error(payload?.message || "Error desconocido en el worker."));
+    }
+  };
+
+  return function callWorker(type, payload, onProgress) {
+    const id = nextRequestId++;
+    return new Promise((resolve, reject) => {
+      pendingRequests.set(id, { resolve, reject, onProgress });
+      worker.postMessage({ id, type, payload });
+    });
+  };
+}
+
+async function createTransformersEngine(onProgress, { modelId = MODEL_ID, preferredBackend = "wasm" } = {}) {
+  const model = getModelById(modelId);
+  if (!model) {
+    throw new Error(`Modelo no soportado: ${modelId}`);
+  }
+
+  const worker = new Worker(new URL("./transformersEngineWorker.js", import.meta.url), {
+    type: "module",
+  });
+  const callWorker = createWorkerRpc(worker);
+
+  const loadResult = await callWorker(
+    "load",
+    { modelId, preferredBackend },
+    (progress) => {
+      onProgress?.({
+        ...progress,
+        text:
+          progress?.progress === 1
+            ? `${model.label} listo.`
+            : `Cargando ${model.label} en ${getRuntimeLabel(model.runtime)}...`,
+      });
+    }
   );
+
+  const backend = loadResult?.backend || preferredBackend;
+
+  const engine = {
+    runtime: model.runtime,
+    backend,
+    modelId,
+    providerModelId: model.providerModelId,
+    worker,
+    unload: async () => {
+      try {
+        await callWorker("unload", {});
+      } finally {
+        worker.terminate();
+      }
+    },
+    interruptGenerate: async () => {
+      await callWorker("interrupt", {});
+    },
+  };
+
+  engine.chat = {
+    completions: {
+      create: async ({ stream = false, ...payload }) => {
+        const result = await callWorker("generate", payload);
+
+        if (stream) {
+          return createSingleChunkStream(result.text || "");
+        }
+
+        return {
+          choices: [{ message: { content: result.text || "" } }],
+        };
+      },
+    },
+  };
+
+  return engine;
+}
+
+export async function createEngine(
+  runtimeModule,
+  onProgress,
+  { modelId = MODEL_ID, contextWindowSize = 4096, preferredBackend } = {}
+) {
+  const model = getModelById(modelId);
+  if (!model) {
+    throw new Error(`Modelo no soportado: ${modelId}`);
+  }
+
+  if (model.runtime === "webllm") {
+    return runtimeModule.CreateMLCEngine(
+      model.providerModelId,
+      { initProgressCallback: onProgress, logLevel: "WARN" },
+      { context_window_size: contextWindowSize }
+    );
+  }
+
+  if (model.runtime === "transformers") {
+    return createTransformersEngine(onProgress, { modelId, preferredBackend });
+  }
+
+  throw new Error(`Runtime no soportado: ${model.runtime}`);
 }
 
 /**
@@ -378,26 +573,248 @@ export function calculateMessagesTokens({
 }
 
 /**
- * Generate a condensed summary of the chat history for context.
+ * Extract key semantic facts from a single user message.
+ * Returns an array of { type, value } objects.
  */
-export function generateChatSummary(messages) {
-  if (messages.length <= 2) return ""; // Minimal history
-  
-  // Get the last few exchanges (user + bot pairs) to avoid token bloat
-  const exchanges = [];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.author === "Bot" && !msg.pending && !msg.streaming) {
-      // Found a bot response, get the preceding user message
-      for (let j = i - 1; j >= 0; j--) {
-        if (messages[j].author === "Cliente") {
-          exchanges.unshift(`- Cliente: ${messages[j].text}\n  Bot: ${msg.text}`);
+function extractMessageFacts(text) {
+  const lower = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  const facts = [];
+
+  // Client name
+  const nameMatch = text.match(
+    /(?:me llamo|soy|mi nombre es|llamame)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{1,20})/i
+  );
+  if (nameMatch) facts.push({ type: "name", value: nameMatch[1] });
+
+  // Explicit order / request
+  const orderMatch = text.match(
+    /(?:quiero|pido|dame|traeme|tráeme|quisiera|pedi|pedí|voy a pedir|me pones|me ponés|me traes|me traés|me das)\s+([^.!?\n]{3,40})/i
+  );
+  if (orderMatch) facts.push({ type: "order", value: orderMatch[1].trim() });
+
+  // Food/drink items mentioned explicitly
+  const itemRegex =
+    /\b(caf[eé]|cortado|cappuccino|latte|medialunas?|tostado|s[aá]ndwich|jugo|agua|cerveza|vino|postre|torta|factura|croissant|submarino|t[eé])\b/gi;
+  const items = text.match(itemRegex);
+  if (items) {
+    for (const item of new Set(items.map((i) => i.toLowerCase()))) {
+      facts.push({ type: "item", value: item });
+    }
+  }
+
+  // Topics consulted
+  const topicPatterns = [
+    [/horario|abre|cierra/, "horario"],
+    [/direc|ubica|calle|llegar|donde est/, "ubicación"],
+    [/telefon|numero|contacto|whatsapp/, "teléfono"],
+    [/pago|pagar|efectivo|tarjeta|transferencia|mercadopago/, "formas de pago"],
+    [/promoci|descuento|oferta/, "promociones"],
+    [/reserva/, "reservas"],
+    [/wifi|internet/, "wifi"],
+    [/delivery|domicilio|envio/, "delivery"],
+    [/menu|carta|platos|opciones/, "menú"],
+    [/vegetarian|vegano|sin gluten|celiac/, "opciones dietéticas"],
+  ];
+  for (const [pattern, topic] of topicPatterns) {
+    if (pattern.test(lower)) facts.push({ type: "topic", value: topic });
+  }
+
+  return facts;
+}
+
+/**
+ * Build a compact summary string from extracted conversation data.
+ */
+function buildSummaryText({ names, orders, topics, lastExchange }) {
+  const lines = [];
+  if (names.length > 0) lines.push(`Nombre del cliente: ${names.join(", ")}`);
+  if (orders.length > 0) lines.push(`Pidió: ${orders.join(", ")}`);
+  if (topics.length > 0) lines.push(`Consultó sobre: ${topics.join(", ")}`);
+
+  let text = "";
+  if (lines.length > 0) {
+    text = `Contexto de la charla:\n${lines.map((l) => `- ${l}`).join("\n")}\n\n`;
+  }
+  text += `Última interacción:\n- Cliente: ${lastExchange.user}\n  Asistente: ${lastExchange.bot}`;
+  return text;
+}
+
+/**
+ * Compute the token budget available for conversation history, based on the
+ * current config. Accounts for system prompt, business info, additional
+ * contexts and the reserved response length.
+ */
+export function computeHistoryBudget(config = {}) {
+  const {
+    contextWindowSize = DEFAULT_CONFIG.contextWindowSize,
+    systemPrompt = SYSTEM_PROMPT,
+    businessInfo = "",
+    additionalContexts = [],
+    maxTokens = DEFAULT_CONFIG.maxTokens,
+  } = config;
+
+  const fixedTokens =
+    estimateTokens(systemPrompt) +
+    estimateTokens(businessInfo) +
+    additionalContexts.reduce((sum, ctx) => sum + estimateTokens(ctx.content || ""), 0) +
+    maxTokens + // potential response
+    80; // structural tokens and question overhead
+
+  return Math.max(150, contextWindowSize - fixedTokens);
+}
+
+/**
+ * Generate a compact semantic summary of the conversation history.
+ *
+ * Instead of accumulating full transcripts, this function extracts key facts
+ * (client name, orders, topics consulted) from every exchange and keeps only
+ * the last interaction verbatim for coherence. When the result exceeds the
+ * token budget it silently prunes the least relevant facts (topics first, then
+ * order details) so the context stays within the model's window — completely
+ * transparent to the user.
+ *
+ * @param {Array}  messages          - Full chat message array.
+ * @param {number} maxContextTokens  - Token budget for history (default 300).
+ */
+export function generateChatSummary(messages, maxContextTokens = 300) {
+  if (!messages || messages.length <= 2) return "";
+
+  // Build ordered user → bot pairs from the message list.
+  const pairs = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].author === "Cliente") {
+      for (let j = i + 1; j < messages.length; j++) {
+        if (messages[j].author === "Bot" && !messages[j].pending && !messages[j].streaming) {
+          pairs.push({ user: messages[i].text, bot: messages[j].text });
           break;
         }
       }
-      if (exchanges.length >= 4) break; // Keep last 4 exchanges (8 messages total)
     }
   }
-  
-  return exchanges.length > 0 ? exchanges.join("\n") : "";
+  if (pairs.length === 0) return "";
+
+  const lastExchange = pairs[pairs.length - 1];
+
+  // Extract and deduplicate semantic facts from ALL user messages.
+  const namesSet = new Set();
+  const ordersSet = new Set();
+  const topicsSet = new Set();
+  for (const { user } of pairs) {
+    for (const fact of extractMessageFacts(user)) {
+      if (fact.type === "name") namesSet.add(fact.value);
+      else if (fact.type === "order" || fact.type === "item") ordersSet.add(fact.value);
+      else if (fact.type === "topic") topicsSet.add(fact.value);
+    }
+  }
+
+  let names = [...namesSet];
+  let orders = [...ordersSet];
+  let topics = [...topicsSet];
+
+  let summary = buildSummaryText({ names, orders, topics, lastExchange });
+
+  // Prune to fit the token budget: remove topics first, then orders. Names and
+  // the last exchange are always preserved to maintain conversation coherence.
+  if (estimateTokens(summary) > maxContextTokens) {
+    while (
+      topics.length > 0 &&
+      estimateTokens(buildSummaryText({ names, orders, topics, lastExchange })) > maxContextTokens
+    ) {
+      topics = topics.slice(0, -1);
+    }
+    while (
+      orders.length > 0 &&
+      estimateTokens(buildSummaryText({ names, orders, topics, lastExchange })) > maxContextTokens
+    ) {
+      orders = orders.slice(0, -1);
+    }
+    summary = buildSummaryText({ names, orders, topics, lastExchange });
+  }
+
+  return summary;
+}
+
+/**
+ * Build an ordered list of context sections for display in Settings.
+ * Returns [{ label, content, tokens }] — one entry per active context block.
+ */
+export function buildContextPreview({
+  systemPrompt = SYSTEM_PROMPT,
+  businessInfo = "",
+  chatHistory = "",
+  additionalContexts = [],
+} = {}) {
+  const sections = [];
+
+  sections.push({
+    label: "System prompt",
+    content: systemPrompt || "(vacío)",
+    tokens: estimateTokens(systemPrompt),
+  });
+
+  if (businessInfo?.trim()) {
+    sections.push({
+      label: "Información del negocio",
+      content: businessInfo.trim(),
+      tokens: estimateTokens(businessInfo),
+    });
+  }
+
+  for (const ctx of additionalContexts || []) {
+    if (ctx.content?.trim()) {
+      sections.push({
+        label: `Contexto: ${ctx.name}`,
+        content: ctx.content.trim(),
+        tokens: estimateTokens(ctx.content),
+      });
+    }
+  }
+
+  if (chatHistory?.trim()) {
+    sections.push({
+      label: "Historial resumido",
+      content: chatHistory.trim(),
+      tokens: estimateTokens(chatHistory),
+    });
+  }
+
+  return sections;
+}
+
+/**
+ * Use the loaded model to summarize, order and clean up raw business info text.
+ * Returns a processed string (ideally valid JSON).
+ */
+export async function summarizeBusinessInfo(engine, rawText, config = {}) {
+  const {
+    temperature = 0.1,
+    topP = 0.85,
+    repetitionPenalty = 1.1,
+  } = config;
+
+  const systemMsg = [
+    "Sos un experto en síntesis de información de negocios.",
+    "Tu tarea es leer el texto dado y producir un JSON limpio, ordenado y correcto con todos los datos del negocio.",
+    "Incluí: nombre, descripción, horarios, sucursales/dirección, teléfono, servicios, formas de pago y cualquier otro dato relevante.",
+    "No inventes información. Solo usá lo que está en el texto.",
+    "Responde ÚNICAMENTE con el JSON válido, sin texto previo ni posterior, sin comentarios.",
+  ].join("\n");
+
+  const userMsg = `Información del negocio:\n${rawText.trim()}\n\nProduce el JSON limpio, ordenado y resumido:`;
+
+  const response = await engine.chat.completions.create({
+    messages: [
+      { role: "system", content: systemMsg },
+      { role: "user", content: userMsg },
+    ],
+    temperature,
+    top_p: topP,
+    repetition_penalty: repetitionPenalty,
+    max_tokens: 512,
+  });
+
+  return response.choices?.[0]?.message?.content?.trim() ?? "";
 }

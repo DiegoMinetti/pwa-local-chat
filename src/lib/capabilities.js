@@ -1,3 +1,5 @@
+import { getModelById, getRuntimeLabel } from "./modelCatalog";
+
 /**
  * Estimate device memory and compute capability.
  */
@@ -28,25 +30,79 @@ export function getDeviceCapabilities() {
 /**
  * Check if a model is compatible with device capabilities.
  */
-export function isModelCompatible(modelId, deviceCapabilities) {
-  const { estimatedMemoryGB, isMobile } = deviceCapabilities;
-  
-  // Model size requirements (approximate GPU memory needed)
-  const modelRequirements = {
-    "Phi-3.5-mini-instruct-q4f16_1-MLC": { minMemoryGB: 3, minTotalGB: 4 },
-    "Llama-3.2-1B-Instruct-q4f16_1-MLC": { minMemoryGB: 1.5, minTotalGB: 2 },
-    "Llama-3.2-3B-Instruct-q4f16_1-MLC": { minMemoryGB: 2.5, minTotalGB: 4 },
-    "gemma-2-2b-it-q4f16_1-MLC": { minMemoryGB: 2, minTotalGB: 3 },
-    "Qwen2.5-1.5B-Instruct-q4f16_1-MLC": { minMemoryGB: 1.5, minTotalGB: 2 },
+export function getModelCompatibility(modelId, browserSupportOrCapabilities) {
+  const model = getModelById(modelId);
+  if (!model) {
+    return {
+      compatible: false,
+      reason: "Modelo no registrado.",
+      backend: null,
+    };
+  }
+
+  const deviceCapabilities = browserSupportOrCapabilities?.deviceCapabilities
+    ? browserSupportOrCapabilities.deviceCapabilities
+    : browserSupportOrCapabilities;
+  const runtimeSupport = browserSupportOrCapabilities?.runtimeSupport || {
+    webgpu: true,
+    wasm: true,
   };
-  
-  const requirements = modelRequirements[modelId];
-  if (!requirements) return true; // unknown model, allow it
-  
-  // On mobile, be more conservative
-  const memoryThreshold = isMobile ? requirements.minTotalGB : requirements.minMemoryGB;
-  
-  return estimatedMemoryGB >= memoryThreshold;
+  const estimatedMemoryGB = deviceCapabilities?.estimatedMemoryGB || 4;
+  const isMobile = Boolean(deviceCapabilities?.isMobile);
+
+  const allowedBackends = model.allowedBackends || [model.preferredBackend || "webgpu"];
+  const compatibleBackends = allowedBackends.filter((backend) => runtimeSupport[backend]);
+
+  if (model.requiresWebGPU && !runtimeSupport.webgpu) {
+    return {
+      compatible: false,
+      reason: "Requiere WebGPU.",
+      backend: null,
+    };
+  }
+
+  if (!compatibleBackends.length) {
+    return {
+      compatible: false,
+      reason: `El runtime ${getRuntimeLabel(model.runtime)} no está disponible en este navegador.`,
+      backend: null,
+    };
+  }
+
+  const preferredOrder = model.preferredBackend
+    ? [model.preferredBackend, ...compatibleBackends.filter((backend) => backend !== model.preferredBackend)]
+    : compatibleBackends;
+
+  for (const backend of preferredOrder) {
+    if (!compatibleBackends.includes(backend)) continue;
+
+    const minMemoryGB = model.minMemoryGB?.[backend] ?? 0;
+    const mobilePenalty = isMobile && backend === "wasm" ? 1 : 0;
+    if (estimatedMemoryGB >= minMemoryGB + mobilePenalty) {
+      return {
+        compatible: true,
+        reason: "Compatible.",
+        backend,
+      };
+    }
+  }
+
+  const minRequired = preferredOrder
+    .map((backend) => model.minMemoryGB?.[backend])
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b)[0];
+
+  return {
+    compatible: false,
+    reason: minRequired
+      ? `Requiere al menos ~${minRequired} GB disponibles para ${getRuntimeLabel(model.runtime)}.`
+      : "No hay backend compatible para este dispositivo.",
+    backend: null,
+  };
+}
+
+export function isModelCompatible(modelId, browserSupportOrCapabilities) {
+  return getModelCompatibility(modelId, browserSupportOrCapabilities).compatible;
 }
 
 export async function assessBrowserSupport({
@@ -59,36 +115,45 @@ export async function assessBrowserSupport({
   if (!secureContext) {
     return {
       supported: false,
-      message: `La app se abrió en un contexto no seguro (${origin}). WebGPU y la PWA requieren HTTPS o http://localhost.`
+      message: `La app se abrió en un contexto no seguro (${origin}). La PWA requiere HTTPS o http://localhost.`
     };
   }
 
-  if (!navigatorRef?.gpu) {
-    return {
-      supported: false,
-      message: "El navegador no expone WebGPU. Usá una versión reciente de Chrome, Edge o Safari con aceleración por hardware activa."
-    };
-  }
+  const runtimeSupport = {
+    webgpu: false,
+    wasm: typeof WebAssembly === "object",
+  };
 
-  try {
-    const adapter = await navigatorRef.gpu.requestAdapter();
+  let webgpuMessage = "WebGPU no disponible.";
 
-    if (!adapter) {
-      return {
-        supported: false,
-        message: "El navegador reconoce WebGPU, pero no pudo obtener un adaptador GPU utilizable."
-      };
+  if (navigatorRef?.gpu) {
+    try {
+      const adapter = await navigatorRef.gpu.requestAdapter();
+
+      if (adapter) {
+        runtimeSupport.webgpu = true;
+        webgpuMessage = "Entorno WebGPU listo.";
+      } else {
+        webgpuMessage = "El navegador reconoce WebGPU, pero no pudo obtener un adaptador GPU utilizable.";
+      }
+    } catch (error) {
+      webgpuMessage = `Falló la inicialización del adaptador WebGPU: ${error.message}`;
     }
-  } catch (error) {
+  } else {
+    webgpuMessage = "El navegador no expone WebGPU. Se usará CPU/WASM cuando haya un modelo compatible.";
+  }
+
+  if (!runtimeSupport.webgpu && !runtimeSupport.wasm) {
     return {
       supported: false,
-      message: `Falló la inicialización del adaptador WebGPU: ${error.message}`
+      message: "Este navegador no ofrece ni WebGPU ni WebAssembly utilizable para cargar modelos locales."
     };
   }
 
   return {
     supported: true,
-    message: "Entorno WebGPU listo.",
+    message: webgpuMessage,
+    runtimeSupport,
     deviceCapabilities: getDeviceCapabilities(),
   };
 }

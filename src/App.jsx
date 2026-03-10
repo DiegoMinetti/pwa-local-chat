@@ -20,24 +20,30 @@ import MessageList from "./components/MessageList";
 import SettingsPanel from "./components/SettingsPanel";
 import StatusPanel from "./components/StatusPanel";
 import TokenCounter from "./components/TokenCounter";
-import { assessBrowserSupport } from "./lib/capabilities";
+import { assessBrowserSupport, getModelCompatibility } from "./lib/capabilities";
 import {
   DEFAULT_CONFIG,
   calculateContextTokens,
   calculateMessagesTokens,
+  computeHistoryBudget,
   createEngine,
   estimateTokens,
+  fetchDynamicContexts,
   generateChatSummary,
+  loadModelRuntimeModule,
   loadBusinessDocument,
   quickLookup,
   streamAssistantReply,
   SUGGESTED_QUESTIONS,
+  summarizeBusinessInfo,
 } from "./lib/chatbot";
+import { getConfiguredModelIds, getModelById, getRuntimeLabel } from "./lib/modelCatalog";
 
 let nextId = 1;
 const newId = () => String(nextId++);
 
 const CONFIG_STORAGE_KEY = 'cafe-central-config';
+const NO_MODEL_WARNING = "No hay un modelo cargado. Abrí Configuración, elegí un modelo principal y, si querés, fallbacks automáticos.";
 
 function makeMsg(author, text, extra = {}) {
   return { id: newId(), author, text, ...extra };
@@ -61,6 +67,7 @@ export default function App() {
   const [downloadPct, setDownloadPct] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [browserSupport, setBrowserSupport] = useState(null);
   const [deviceCapabilities, setDeviceCapabilities] = useState(null);
   const [config, setConfig] = useState(() => {
     // Load saved config from localStorage
@@ -244,6 +251,9 @@ export default function App() {
   async function maybeClearOldModelCache(previousModelId, nextModelId) {
     if (!previousModelId || previousModelId === nextModelId) return;
 
+    const previousModel = getModelById(previousModelId);
+    if (previousModel?.runtime !== "webllm") return;
+
     const isMobileDevice =
       deviceCapabilities?.isMobile ??
       /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
@@ -308,9 +318,19 @@ export default function App() {
 
       try {
         // Accumulate text without showing intermediate updates
+        const dynamicResult = await fetchDynamicContexts(configRef.current.dynamicSources || []);
+        const allDynamicContexts = dynamicResult.contexts;
+        const staticContexts = configRef.current.additionalContexts || [];
+
+        if (dynamicResult.errors.length > 0) {
+          const failed = dynamicResult.errors.map((e) => e.name).join(", ");
+          setError(`No se pudo actualizar en tiempo real: ${failed}. Se usará la última información disponible.`);
+        }
+
         const config = {
           ...configRef.current,
           chatHistory: chatHistoryRef.current,
+          additionalContexts: [...staticContexts, ...allDynamicContexts],
         };
         
         const finalText = await streamAssistantReply(
@@ -325,7 +345,7 @@ export default function App() {
         
         // Update chat history after bot responds
         setMessages((current) => {
-          const newHistory = generateChatSummary(current);
+          const newHistory = generateChatSummary(current, computeHistoryBudget(configRef.current));
           setChatHistory(newHistory);
           chatHistoryRef.current = newHistory;
           return current;
@@ -357,8 +377,12 @@ export default function App() {
         setMessages([makeMsg("Bot", `Error: ${support.message}`)]);
         return;
       }
-      
+
+      setBrowserSupport(support);
       setDeviceCapabilities(support.deviceCapabilities);
+      if (support.message !== "Entorno WebGPU listo.") {
+        setError(support.message);
+      }
       
       // Load business info
       try {
@@ -386,7 +410,7 @@ export default function App() {
 
   // Bootstrap engine only when user applies settings with a valid model
   useEffect(() => {
-    if (bootKey === 0) return; // Don't run on initial mount
+    if (bootKey === 0 || !browserSupport) return; // Don't run on initial mount
     
     let cancelled = false;
     const snapshot = configRef.current;
@@ -399,30 +423,67 @@ export default function App() {
 
       const previousModelId = activeModelIdRef.current;
       await releaseCurrentEngine();
-      await maybeClearOldModelCache(previousModelId, snapshot.modelId);
 
-      const webllm = await import("@mlc-ai/web-llm");
-      const engine = await createEngine(
-        webllm,
-        (progress) => {
-          if (cancelled) return;
-          const pct =
-            typeof progress.progress === "number"
-              ? Math.round(progress.progress * 100)
-              : null;
-          setDownloadPct(pct);
-        },
-        {
-          modelId: snapshot.modelId,
-          contextWindowSize: snapshot.contextWindowSize,
+      const attempts = [];
+      let selectedModel = null;
+      let engine = null;
+
+      for (const candidateModelId of getConfiguredModelIds(snapshot)) {
+        const compatibility = getModelCompatibility(candidateModelId, browserSupport);
+        const model = getModelById(candidateModelId);
+
+        if (!compatibility.compatible) {
+          attempts.push(`${model?.label || candidateModelId}: ${compatibility.reason}`);
+          continue;
         }
-      );
 
-      if (cancelled) return;
+        try {
+          await maybeClearOldModelCache(previousModelId, candidateModelId);
+          const runtimeModule = await loadModelRuntimeModule(candidateModelId);
+          engine = await createEngine(
+            runtimeModule,
+            (progress) => {
+              if (cancelled) return;
+              const pct =
+                typeof progress.progress === "number"
+                  ? Math.round(progress.progress * 100)
+                  : null;
+              setDownloadPct(pct);
+            },
+            {
+              modelId: candidateModelId,
+              contextWindowSize: snapshot.contextWindowSize,
+              preferredBackend: compatibility.backend,
+            }
+          );
+          selectedModel = { ...model, backend: compatibility.backend };
+          break;
+        } catch (err) {
+          attempts.push(`${model?.label || candidateModelId}: ${err.message}`);
+        }
+      }
+
+      if (!engine || !selectedModel) {
+        throw new Error(`No se pudo cargar ningún modelo configurado. ${attempts.join(" | ")}`);
+      }
+
+      if (cancelled) {
+        await engine.unload?.();
+        return;
+      }
 
       engineRef.current = engine;
-      activeModelIdRef.current = snapshot.modelId;
+      activeModelIdRef.current = selectedModel.id;
       setDownloading(false);
+
+      if (selectedModel.id !== snapshot.modelId) {
+        setError(
+          `Se cargó automáticamente ${selectedModel.label} en ${getRuntimeLabel(selectedModel.runtime)} porque el modelo principal no era compatible o falló al iniciar.`
+        );
+      } else if (browserSupport.message !== "Entorno WebGPU listo.") {
+        setError(browserSupport.message);
+      }
+
       if (isFirstBootstrap) {
         setIsFirstBootstrap(false);
         setSettingsOpen(false);
@@ -448,7 +509,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [processQueue, bootKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [processQueue, bootKey, browserSupport]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Release GPU resources when leaving the page/app.
   useEffect(() => {
@@ -465,8 +526,15 @@ export default function App() {
     setQuestion("");
     setError("");
 
+    // If there is no loaded model (and we are not currently downloading one),
+    // force configuration flow before accepting chat interactions.
+    if (!engineRef.current && !downloading) {
+      handleMissingModelWarning();
+      return;
+    }
+
     // While engine is still loading, try an instant text-search answer.
-    if (!engineRef.current && configRef.current.businessInfo) {
+    if (!engineRef.current && downloading && configRef.current.businessInfo) {
       const quick = quickLookup(configRef.current.businessInfo, cleanQuestion);
       if (quick) {
         setMessages((current) => [
@@ -494,19 +562,38 @@ export default function App() {
     submitQuestion(question);
   }
 
+  function handleMissingModelWarning() {
+    setError(NO_MODEL_WARNING);
+    setSettingsOpen(true);
+  }
+
+  function handleCloseSettings() {
+    setSettingsOpen(false);
+    if (!engineRef.current && !downloading) {
+      setError(NO_MODEL_WARNING);
+    }
+  }
+
   function applySettings(newConfig) {
     const needsRestart =
       newConfig.modelId !== config.modelId ||
+      JSON.stringify(newConfig.fallbackModelIds || []) !== JSON.stringify(config.fallbackModelIds || []) ||
       newConfig.contextWindowSize !== config.contextWindowSize;
+
+    const normalizedConfig = {
+      ...newConfig,
+      fallbackModelIds: Array.isArray(newConfig.fallbackModelIds) ? newConfig.fallbackModelIds : [],
+      dynamicSources: Array.isArray(newConfig.dynamicSources) ? newConfig.dynamicSources : [],
+    };
     
     // Save to localStorage
     try {
-      localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(newConfig));
+      localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(normalizedConfig));
     } catch (err) {
       console.warn('Failed to save config:', err);
     }
     
-    setConfig(newConfig);
+    setConfig(normalizedConfig);
     setSettingsOpen(false);
     
     if (needsRestart) {
@@ -701,11 +788,18 @@ export default function App() {
       </Container>
       <SettingsPanel
         open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        onClose={handleCloseSettings}
         config={config}
         onApply={applySettings}
         engineLoading={downloading}
+        browserSupport={browserSupport}
         deviceCapabilities={deviceCapabilities}
+        chatHistory={chatHistory}
+        canSummarize={!downloading && !busy && !!engineRef.current}
+        onSummarize={async (rawText) => {
+          if (!engineRef.current) throw new Error("Modelo no cargado");
+          return summarizeBusinessInfo(engineRef.current, rawText, configRef.current);
+        }}
       />
     </Box>
   );

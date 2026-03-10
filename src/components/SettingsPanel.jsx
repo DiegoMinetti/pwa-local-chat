@@ -6,24 +6,35 @@ import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ErrorRoundedIcon from "@mui/icons-material/ErrorRounded";
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import DeleteRoundedIcon from "@mui/icons-material/DeleteRounded";
+import AutoFixHighRoundedIcon from "@mui/icons-material/AutoFixHighRounded";
+import ExpandMoreRoundedIcon from "@mui/icons-material/ExpandMoreRounded";
+import VisibilityRoundedIcon from "@mui/icons-material/VisibilityRounded";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Box,
   Button,
+  Chip,
+  CircularProgress,
   Divider,
   Drawer,
   FormControl,
+  FormControlLabel,
   IconButton,
   InputLabel,
   MenuItem,
   Select,
   Slider,
   Stack,
+  Switch,
   TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
-import { AVAILABLE_MODELS, DEFAULT_CONFIG } from "../lib/chatbot";
-import { isModelCompatible } from "../lib/capabilities";
+import { AVAILABLE_MODELS, DEFAULT_CONFIG, buildContextPreview } from "../lib/chatbot";
+import { getModelCompatibility } from "../lib/capabilities";
+import { getRuntimeLabel } from "../lib/modelCatalog";
 
 function SliderRow({ label, hint, value, ...rest }) {
   return (
@@ -46,15 +57,29 @@ function SliderRow({ label, hint, value, ...rest }) {
   );
 }
 
-export default function SettingsPanel({ open, onClose, config, onApply, engineLoading, deviceCapabilities }) {
+export default function SettingsPanel({
+  open,
+  onClose,
+  config,
+  onApply,
+  engineLoading,
+  browserSupport,
+  deviceCapabilities,
+  chatHistory = "",
+  canSummarize = false,
+  onSummarize,
+}) {
   const [draft, setDraft] = useState(config);
   const [jsonValid, setJsonValid] = useState(true);
+  const [summarizing, setSummarizing] = useState(false);
+  const [summarizeError, setSummarizeError] = useState("");
 
   // Reset draft to the current applied config every time the panel opens.
   useEffect(() => {
     if (open) {
       setDraft(config);
       validateJson(config.businessInfo);
+      setSummarizeError("");
     }
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -64,17 +89,34 @@ export default function SettingsPanel({ open, onClose, config, onApply, engineLo
   }
 
   function validateJson(text) {
-    if (!text?.trim()) {
-      setJsonValid(true);
-      return;
-    }
+    if (!text?.trim()) { setJsonValid(true); return; }
+    try { JSON.parse(text); setJsonValid(true); } catch { setJsonValid(false); }
+  }
+
+  async function handleSummarize() {
+    if (!onSummarize || !draft.businessInfo?.trim()) return;
+    setSummarizing(true);
+    setSummarizeError("");
     try {
-      JSON.parse(text);
-      setJsonValid(true);
-    } catch {
-      setJsonValid(false);
+      let result = await onSummarize(draft.businessInfo);
+      // Extract the JSON block in case the model added any preamble/postamble
+      const jsonMatch = result.match(/\{[\s\S]*\}/);
+      if (jsonMatch) result = jsonMatch[0];
+      set("businessInfo", result);
+    } catch (err) {
+      setSummarizeError(err?.message || "Error al procesar con el modelo.");
+    } finally {
+      setSummarizing(false);
     }
   }
+
+  const previewSections = buildContextPreview({
+    systemPrompt: draft.systemPrompt,
+    businessInfo: draft.businessInfo,
+    chatHistory,
+    additionalContexts: draft.additionalContexts,
+  });
+  const totalPreviewTokens = previewSections.reduce((s, sec) => s + sec.tokens, 0);
 
   const requiresRestart =
     draft.modelId !== config.modelId ||
@@ -127,29 +169,35 @@ export default function SettingsPanel({ open, onClose, config, onApply, engineLo
               <Select
                 label="Modelo de IA"
                 value={draft.modelId}
-                onChange={(e) => set("modelId", e.target.value)}
+                onChange={(e) => {
+                  const nextModelId = e.target.value;
+                  setDraft((current) => ({
+                    ...current,
+                    modelId: nextModelId,
+                    fallbackModelIds: (current.fallbackModelIds || []).filter((id) => id !== nextModelId),
+                  }));
+                }}
               >
                 {AVAILABLE_MODELS.map((m) => {
-                  const compatible = deviceCapabilities 
-                    ? isModelCompatible(m.id, deviceCapabilities) 
-                    : true;
-                  
+                  const compatibility = browserSupport || deviceCapabilities
+                    ? getModelCompatibility(m.id, browserSupport || deviceCapabilities)
+                    : { compatible: true, reason: "Compatible." };
                   return (
-                    <MenuItem key={m.id} value={m.id} disabled={!compatible}>
+                    <MenuItem key={m.id} value={m.id} disabled={!compatibility.compatible}>
                       <Box>
-                        <Typography 
-                          variant="body2" 
+                        <Typography
+                          variant="body2"
                           fontWeight={500}
-                          sx={{ opacity: compatible ? 1 : 0.5 }}
+                          sx={{ opacity: compatibility.compatible ? 1 : 0.5 }}
                         >
-                          {m.label} {!compatible && "⚠️"}
+                          {m.label} {!compatibility.compatible && "⚠️"}
                         </Typography>
-                        <Typography 
-                          variant="caption" 
-                          color={compatible ? "text.secondary" : "error"}
+                        <Typography
+                          variant="caption"
+                          color={compatibility.compatible ? "text.secondary" : "error"}
                         >
-                          {m.size}
-                          {!compatible && " — Requiere más memoria"}
+                          {getRuntimeLabel(m.runtime)} · {m.size} · {m.description}
+                          {!compatibility.compatible && ` — ${compatibility.reason}`}
                         </Typography>
                       </Box>
                     </MenuItem>
@@ -157,10 +205,58 @@ export default function SettingsPanel({ open, onClose, config, onApply, engineLo
                 })}
               </Select>
             </FormControl>
+            <FormControl fullWidth size="small" disabled={engineLoading} sx={{ mt: 1.25 }}>
+              <InputLabel>Fallback automático</InputLabel>
+              <Select
+                multiple
+                label="Fallback automático"
+                value={draft.fallbackModelIds || []}
+                onChange={(e) => set("fallbackModelIds", e.target.value)}
+                renderValue={(selected) => {
+                  if (!selected.length) return "Sin fallback";
+                  return AVAILABLE_MODELS.filter((model) => selected.includes(model.id))
+                    .map((model) => model.label)
+                    .join(", ");
+                }}
+              >
+                {AVAILABLE_MODELS.map((m) => {
+                  const compatibility = browserSupport || deviceCapabilities
+                    ? getModelCompatibility(m.id, browserSupport || deviceCapabilities)
+                    : { compatible: true, reason: "Compatible." };
+                  const disabled = m.id === draft.modelId || !compatibility.compatible;
+
+                  return (
+                    <MenuItem key={`fallback-${m.id}`} value={m.id} disabled={disabled}>
+                      <Box>
+                        <Typography variant="body2" fontWeight={500} sx={{ opacity: disabled ? 0.5 : 1 }}>
+                          {m.label}
+                        </Typography>
+                        <Typography
+                          variant="caption"
+                          color={disabled && m.id !== draft.modelId ? "error" : "text.secondary"}
+                        >
+                          {getRuntimeLabel(m.runtime)} · {m.description}
+                          {m.id === draft.modelId && " — Ya está como modelo principal"}
+                          {disabled && m.id !== draft.modelId && ` — ${compatibility.reason}`}
+                        </Typography>
+                      </Box>
+                    </MenuItem>
+                  );
+                })}
+              </Select>
+            </FormControl>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, display: "block" }}>
+              Si el modelo principal no puede arrancar, la app probará estos modelos en orden.
+            </Typography>
             {deviceCapabilities && (
               <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, display: "block" }}>
                 Memoria del dispositivo: ~{deviceCapabilities.estimatedMemoryGB} GB
                 {deviceCapabilities.isMobile && " (móvil)"}
+              </Typography>
+            )}
+            {browserSupport?.runtimeSupport && (
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
+                Backends disponibles: {browserSupport.runtimeSupport.webgpu ? "WebGPU" : "sin WebGPU"} · {browserSupport.runtimeSupport.wasm ? "WASM" : "sin WASM"}
               </Typography>
             )}
           </Box>
@@ -243,11 +339,9 @@ export default function SettingsPanel({ open, onClose, config, onApply, engineLo
                 Información del negocio (JSON)
               </Typography>
               {draft.businessInfo?.trim() && (
-                jsonValid ? (
-                  <CheckCircleRoundedIcon fontSize="small" color="success" />
-                ) : (
-                  <ErrorRoundedIcon fontSize="small" color="error" />
-                )
+                jsonValid
+                  ? <CheckCircleRoundedIcon fontSize="small" color="success" />
+                  : <ErrorRoundedIcon fontSize="small" color="error" />
               )}
             </Stack>
             <TextField
@@ -269,6 +363,36 @@ export default function SettingsPanel({ open, onClose, config, onApply, engineLo
                 style: { fontFamily: "monospace", fontSize: "0.85rem" },
               }}
             />
+            <Stack direction="row" spacing={1} alignItems="center" mt={1} flexWrap="wrap">
+              <Tooltip
+                title={
+                  canSummarize
+                    ? "Usa el modelo cargado para ordenar, corregir y resumir el JSON del negocio"
+                    : "Cargá el modelo primero para usar esta función"
+                }
+              >
+                <span>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    disabled={!canSummarize || !draft.businessInfo?.trim() || summarizing}
+                    onClick={handleSummarize}
+                    startIcon={
+                      summarizing
+                        ? <CircularProgress size={14} />
+                        : <AutoFixHighRoundedIcon fontSize="small" />
+                    }
+                  >
+                    {summarizing ? "Procesando…" : "Resumir con IA"}
+                  </Button>
+                </span>
+              </Tooltip>
+              {summarizeError && (
+                <Typography variant="caption" color="error.main">
+                  {summarizeError}
+                </Typography>
+              )}
+            </Stack>
           </Box>
 
           <Divider />
@@ -362,6 +486,108 @@ export default function SettingsPanel({ open, onClose, config, onApply, engineLo
           </Box>
 
           <Divider />
+
+          {/* FUENTES EN TIEMPO REAL */}
+          <Box>
+            <Stack direction="row" spacing={1} alignItems="center" mb={1.5}>
+              <Typography variant="overline" color="text.secondary">
+                Fuentes en tiempo real (API)
+              </Typography>
+              <Tooltip title="Agregar endpoint en tiempo real (ej: /api/prices)">
+                <IconButton
+                  size="small"
+                  onClick={() => {
+                    const newSource = { name: "Nueva API", endpoint: "", enabled: true };
+                    set("dynamicSources", [...(draft.dynamicSources || []), newSource]);
+                  }}
+                >
+                  <AddRoundedIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+
+            {draft.dynamicSources?.length > 0 ? (
+              <Stack spacing={2}>
+                {draft.dynamicSources.map((source, idx) => (
+                  <Box
+                    key={idx}
+                    sx={{
+                      p: 1.5,
+                      border: "1px solid",
+                      borderColor: "divider",
+                      borderRadius: 1,
+                      bgcolor: "action.hover",
+                    }}
+                  >
+                    <Stack spacing={1}>
+                      <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+                        <TextField
+                          size="small"
+                          label="Nombre"
+                          value={source.name}
+                          onChange={(e) => {
+                            const updated = [...draft.dynamicSources];
+                            updated[idx].name = e.target.value;
+                            set("dynamicSources", updated);
+                          }}
+                          placeholder="ej: Precios"
+                          sx={{ flex: 1 }}
+                        />
+                        <Tooltip title="Eliminar fuente">
+                          <IconButton
+                            size="small"
+                            onClick={() => {
+                              set(
+                                "dynamicSources",
+                                draft.dynamicSources.filter((_, i) => i !== idx)
+                              );
+                            }}
+                          >
+                            <DeleteRoundedIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </Stack>
+                      <TextField
+                        size="small"
+                        fullWidth
+                        label="Endpoint"
+                        value={source.endpoint}
+                        onChange={(e) => {
+                          const updated = [...draft.dynamicSources];
+                          updated[idx].endpoint = e.target.value;
+                          set("dynamicSources", updated);
+                        }}
+                        placeholder="https://api.ejemplo.com/prices"
+                        inputProps={{ style: { fontFamily: "monospace", fontSize: "0.85rem" } }}
+                      />
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={source.enabled !== false}
+                            onChange={(e) => {
+                              const updated = [...draft.dynamicSources];
+                              updated[idx].enabled = e.target.checked;
+                              set("dynamicSources", updated);
+                            }}
+                            size="small"
+                          />
+                        }
+                        label="Activa"
+                      />
+                    </Stack>
+                  </Box>
+                ))}
+              </Stack>
+            ) : (
+              <Typography variant="caption" color="text.secondary">
+                Sin fuentes dinámicas. Agrega una API para actualizar precios, mesas u otros datos en tiempo real.
+              </Typography>
+            )}
+          </Box>
+
+          <Divider />
+
+          {/* MOTOR */}
           <Box>
             <Typography variant="overline" color="text.secondary" display="block" mb={1}>
               Motor
@@ -385,6 +611,90 @@ export default function SettingsPanel({ open, onClose, config, onApply, engineLo
                 ⚠ Cambiar el modelo o la ventana de contexto reiniciará el motor de IA.
               </Typography>
             )}
+          </Box>
+
+          <Divider />
+
+          {/* VISTA DEL CONTEXTO ACTIVO */}
+          <Box>
+            <Accordion
+              disableGutters
+              elevation={0}
+              sx={{
+                border: "1px solid",
+                borderColor: "divider",
+                borderRadius: 1,
+                "&:before": { display: "none" },
+              }}
+            >
+              <AccordionSummary expandIcon={<ExpandMoreRoundedIcon />}>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <VisibilityRoundedIcon fontSize="small" color="action" />
+                  <Typography variant="body2" fontWeight={600}>
+                    Vista del contexto activo
+                  </Typography>
+                  <Chip
+                    label={`${totalPreviewTokens.toLocaleString("es")} tokens`}
+                    size="small"
+                    variant="outlined"
+                    sx={{ fontSize: "0.7rem", height: 20 }}
+                  />
+                </Stack>
+              </AccordionSummary>
+              <AccordionDetails sx={{ p: 0 }}>
+                <Stack divider={<Divider />}>
+                  {previewSections.map((sec) => (
+                    <Box key={sec.label} sx={{ px: 2, py: 1.5 }}>
+                      <Stack
+                        direction="row"
+                        justifyContent="space-between"
+                        alignItems="center"
+                        mb={0.5}
+                      >
+                        <Typography
+                          variant="caption"
+                          fontWeight={700}
+                          color="text.secondary"
+                          sx={{ textTransform: "uppercase", letterSpacing: "0.05em" }}
+                        >
+                          {sec.label}
+                        </Typography>
+                        <Chip
+                          label={`${sec.tokens.toLocaleString("es")} tk`}
+                          size="small"
+                          sx={{ fontSize: "0.65rem", height: 18 }}
+                        />
+                      </Stack>
+                      <Box
+                        component="pre"
+                        sx={{
+                          fontFamily: "monospace",
+                          fontSize: "0.75rem",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                          m: 0,
+                          maxHeight: 160,
+                          overflowY: "auto",
+                          bgcolor: "action.hover",
+                          borderRadius: 0.5,
+                          p: 1,
+                          color: "text.primary",
+                        }}
+                      >
+                        {sec.content}
+                      </Box>
+                    </Box>
+                  ))}
+                  {previewSections.length === 0 && (
+                    <Box sx={{ px: 2, py: 2 }}>
+                      <Typography variant="caption" color="text.secondary">
+                        Sin contexto configurado todavía.
+                      </Typography>
+                    </Box>
+                  )}
+                </Stack>
+              </AccordionDetails>
+            </Accordion>
           </Box>
 
         </Stack>

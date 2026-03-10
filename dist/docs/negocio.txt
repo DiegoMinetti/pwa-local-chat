@@ -1,37 +1,268 @@
-Nombre del negocio: Cafe Aurora
+{
+  "metadata": {
+    "version": "1.0",
+    "ultima_actualizacion": "2026-03-08",
+    "moneda": "ARS",
+    "zona_horaria": "America/Argentina/Buenos_Aires",
+    "idioma_principal": "es",
+    "pais": "Argentina",
+    "ciudad_principal": "Buenos Aires",
+    "politica_actualizacion_precios": "Los precios pueden actualizarse trimestralmente.",
+    "fuente_datos": "Base interna del local",
+    "descripcion_dataset": "Información estructurada para que un agente pueda responder consultas de clientes sobre el local."
+  },
 
-Descripcion:
-Cafe Aurora es una cafeteria de barrio que sirve cafe de especialidad, pasteleria artesanal y sandwiches.
+  "intenciones_soportadas": [
+    "horarios",
+    "menu",
+    "precios",
+    "reservas",
+    "ubicacion",
+    "accesibilidad",
+    "concurrencia",
+    "medios_pago",
+    "sucursales",
+    "servicios",
+    "dietas",
+    "tiempos_espera",
+    "delivery",
+    "takeaway",
+    "contacto"
+  ],
 
-Direccion:
-Calle Mendoza 245, Rosario, Santa Fe.
+  "local": {
+    "nombre": "Café Central",
+    "tipo": "Cafetería y brunch",
+    "descripcion": "Cafetería especializada en café de especialidad, brunch, pastelería artesanal y almuerzos livianos.",
+    "fundacion": 2018,
+    "sitio_web": "https://cafecentral.com",
+    "telefono": "+54 11 4567 8899",
+    "email": "contacto@cafecentral.com",
+    "redes_sociales": {
+      "instagram": "@cafecentral",
+      "facebook": "cafecentralba"
+    }
+  },
 
-Horarios:
-Lunes a viernes de 8:00 a 19:00.
-Sabados de 9:00 a 14:00.
-Domingos cerrado.
+  "horarios": {
+    "regular": {
+      "lunes": "08:00 - 20:00",
+      "martes": "08:00 - 20:00",
+      "miercoles": "08:00 - 20:00",
+      "jueves": "08:00 - 22:00",
+      "viernes": "08:00 - 23:00",
+      "sabado": "09:00 - 23:00",
+      "domingo": "09:00 - 20:00"
+    },
+    "cocina_cierra": "30 minutos antes del cierre",
+    "horarios_especiales": {
+      "navidad": "cerrado",
+      "año_nuevo": "cerrado"
+    }
+  },
 
-Telefono:
-341 555 0198.
+  "sucursales": [
+    {
+      "id": "centro",
+      "nombre": "Café Central - Centro",
+      "direccion": "Av. Corrientes 1234, Buenos Aires",
+      "barrio": "San Nicolás",
+      "capacidad_mesas": 22,
+      "capacidad_personas": 80,
+      "mesas_exterior": 6,
+      "wifi": true,
+      "acceso_silla_ruedas": true,
+      "baño_discapacitados": true,
+      "estacionamiento": false,
+      "pet_friendly": true,
+      "toma_corriente_para_laptop": true,
+      "tiempo_promedio_espera": {
+        "baja_concurrencia": "0-5 minutos",
+        "media_concurrencia": "10 minutos",
+        "alta_concurrencia": "20-30 minutos"
+      },
+      "concurrencia_estimada": {
+        "lunes": "media",
+        "martes": "media",
+        "miercoles": "media",
+        "jueves": "media",
+        "viernes": "alta",
+        "sabado": "alta",
+        "domingo": "alta"
+      }
+    },
+    {
+      "id": "palermo",
+      "nombre": "Café Central - Palermo",
+      "direccion": "Gorriti 5200, Buenos Aires",
+      "barrio": "Palermo",
+      "capacidad_mesas": 30,
+      "capacidad_personas": 110,
+      "mesas_exterior": 10,
+      "wifi": true,
+      "acceso_silla_ruedas": true,
+      "baño_discapacitados": true,
+      "estacionamiento": true,
+      "pet_friendly": true,
+      "toma_corriente_para_laptop": true,
+      "tiempo_promedio_espera": {
+        "baja_concurrencia": "0-10 minutos",
+        "media_concurrencia": "10-15 minutos",
+        "alta_concurrencia": "20-40 minutos"
+      },
+      "concurrencia_estimada": {
+        "lunes": "media",
+        "martes": "media",
+        "miercoles": "media",
+        "jueves": "alta",
+        "viernes": "alta",
+        "sabado": "muy alta",
+        "domingo": "muy alta"
+      }
+    }
+  ],
 
-Servicios:
-- Consumo en el local.
-- Retiro por mostrador.
-- Pedidos por telefono.
-- Opciones vegetarianas.
-- Wi-Fi gratuito.
+  "servicios": {
+    "wifi": true,
+    "takeaway": true,
+    "delivery": true,
+    "reservas": true,
+    "eventos_privados": true,
+    "medios_de_pago": [
+      "Efectivo",
+      "Tarjeta de débito",
+      "Tarjeta de crédito",
+      "MercadoPago",
+      "Transferencia"
+    ]
+  },
 
-Metodos de pago:
-- Efectivo.
-- Tarjetas de debito.
-- Tarjetas de credito.
-- Transferencia.
+  "menu": {
+    "cafes": [
+      {
+        "nombre": "Espresso",
+        "descripcion": "Café corto intenso",
+        "precio": 1800
+      },
+      {
+        "nombre": "Americano",
+        "descripcion": "Espresso con agua caliente",
+        "precio": 2200
+      },
+      {
+        "nombre": "Latte",
+        "descripcion": "Espresso con leche vaporizada",
+        "precio": 2800
+      },
+      {
+        "nombre": "Flat White",
+        "descripcion": "Café con microespuma",
+        "precio": 3000
+      },
+      {
+        "nombre": "Cappuccino",
+        "descripcion": "Café con espuma y cacao",
+        "precio": 3200
+      }
+    ],
 
-Promociones:
-- De lunes a viernes, cafe con medialuna a precio promocional hasta las 10:30.
-- Los viernes hay 15 por ciento de descuento en granos de cafe para llevar.
+    "bebidas_frias": [
+      {
+        "nombre": "Cold Brew",
+        "precio": 3500
+      },
+      {
+        "nombre": "Limonada casera",
+        "precio": 3000
+      },
+      {
+        "nombre": "Jugo natural de naranja",
+        "precio": 3200
+      }
+    ],
 
-Politicas:
-- No se toman reservas de mesas.
-- Los pedidos especiales para eventos se solicitan con 48 horas de anticipacion.
-- Las mascotas son bienvenidas en el sector exterior.
+    "brunch": [
+      {
+        "nombre": "Avocado Toast",
+        "descripcion": "Pan de masa madre con palta, huevo poché y semillas",
+        "precio": 7800
+      },
+      {
+        "nombre": "Huevos revueltos con tostadas",
+        "descripcion": "Huevos revueltos con manteca y tostadas",
+        "precio": 6900
+      },
+      {
+        "nombre": "Bagel con salmón",
+        "descripcion": "Bagel tostado con queso crema, salmón y rúcula",
+        "precio": 9800
+      }
+    ],
+
+    "pasteleria": [
+      {
+        "nombre": "Medialuna de manteca",
+        "precio": 1500
+      },
+      {
+        "nombre": "Croissant de almendras",
+        "precio": 2800
+      },
+      {
+        "nombre": "Cheesecake",
+        "precio": 4500
+      },
+      {
+        "nombre": "Brownie",
+        "precio": 3800
+      }
+    ],
+
+    "almuerzos": [
+      {
+        "nombre": "Ensalada Caesar",
+        "precio": 7500
+      },
+      {
+        "nombre": "Sandwich de pollo grillado",
+        "precio": 8200
+      },
+      {
+        "nombre": "Tarta del día",
+        "precio": 6800
+      }
+    ]
+  },
+
+  "dietas_y_opciones": {
+    "vegetariano": true,
+    "vegano": true,
+    "sin_gluten": true,
+    "leche_vegetal_disponible": [
+      "almendra",
+      "avena",
+      "soja"
+    ]
+  },
+
+  "faq": [
+    {
+      "pregunta": "¿Aceptan reservas?",
+      "respuesta": "Sí, se pueden hacer reservas desde el sitio web o por teléfono."
+    },
+    {
+      "pregunta": "¿Hay opciones vegetarianas?",
+      "respuesta": "Sí, varias opciones del menú son vegetarianas."
+    },
+    {
+      "pregunta": "¿Se permiten mascotas?",
+      "respuesta": "Sí, en las mesas del exterior."
+    }
+  ],
+
+  "tiempos_promedio": {
+    "preparacion_cafe": "3-5 minutos",
+    "preparacion_brunch": "10-15 minutos",
+    "preparacion_almuerzo": "15-20 minutos"
+  }
+}

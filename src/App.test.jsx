@@ -6,8 +6,7 @@ vi.mock("@mlc-ai/web-llm", () => ({}));
 
 vi.mock("./lib/capabilities", () => ({
   assessBrowserSupport: vi.fn(),
-  getDeviceCapabilities: vi.fn(),
-  isModelCompatible: vi.fn(),
+  getModelCompatibility: vi.fn(() => ({ compatible: true, reason: "Compatible.", backend: "webgpu" })),
 }));
 
 vi.mock("./lib/chatbot", async () => {
@@ -20,7 +19,7 @@ vi.mock("./lib/chatbot", async () => {
   };
 });
 
-import { assessBrowserSupport, getDeviceCapabilities, isModelCompatible } from "./lib/capabilities";
+import { assessBrowserSupport, getModelCompatibility } from "./lib/capabilities";
 import { createEngine, loadBusinessDocument, streamAssistantReply } from "./lib/chatbot";
 
 describe("App", () => {
@@ -43,10 +42,10 @@ describe("App", () => {
     assessBrowserSupport.mockResolvedValue({ 
       supported: true, 
       message: "ok",
+      runtimeSupport: { webgpu: true, wasm: true },
       deviceCapabilities: { isMobile: false, estimatedMemoryGB: 8, hasDeviceMemoryAPI: true }
     });
-    getDeviceCapabilities.mockReturnValue({ isMobile: false, estimatedMemoryGB: 8, hasDeviceMemoryAPI: true });
-    isModelCompatible.mockReturnValue(true);
+    getModelCompatibility.mockReturnValue({ compatible: true, reason: "Compatible.", backend: "webgpu" });
     loadBusinessDocument.mockResolvedValue("Horario: 8 a 18");
     createEngine.mockResolvedValue({});
     streamAssistantReply.mockImplementation(async (engine, businessInfo, question, onToken) => {
@@ -107,6 +106,45 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(screen.getAllByText(/webgpu no disponible/i).length).toBeGreaterThan(0);
+    });
+  });
+
+  it("si intenta enviar sin modelo cargado abre configuración y avisa", async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /abrir configuración/i }).length).toBeGreaterThan(0);
+    });
+
+    fireEvent.change(screen.getAllByLabelText(/pregunta del cliente/i).at(-1), {
+      target: { value: "¿Cuál es el horario?" },
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: /enviar/i }).at(-1));
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("heading", { name: /configuración/i }).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/no hay un modelo cargado/i).length).toBeGreaterThan(0);
+    });
+  });
+
+  it("si cierra configuración sin aplicar y no hay modelo muestra aviso", async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /abrir configuración/i }).length).toBeGreaterThan(0);
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: /abrir configuración/i }).at(-1));
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("heading", { name: /configuración/i }).length).toBeGreaterThan(0);
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: /cerrar configuración/i }).at(-1));
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/elegí un modelo principal/i).length).toBeGreaterThan(0);
     });
   });
 });
