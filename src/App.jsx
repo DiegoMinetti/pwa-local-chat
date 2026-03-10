@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
+import ExpandMoreRoundedIcon from "@mui/icons-material/ExpandMoreRounded";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Card,
@@ -41,6 +45,7 @@ function makeMsg(author, text, extra = {}) {
 
 export default function App() {
   const engineRef = useRef(null);
+  const activeModelIdRef = useRef(null);
   const pendingQueueRef = useRef([]); // [{ question, botMsgId }]
   const processingRef = useRef(false);
   const inputRef = useRef(null); // Chat input reference for global keyboard capture
@@ -83,6 +88,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatHistory, setChatHistory] = useState("");
   const [tokenInfo, setTokenInfo] = useState({ contextTokens: 0, responseTokens: 0, totalTokens: 0 });
+  const [showTokenDetails, setShowTokenDetails] = useState(false);
 
   // Ref for the composer wrapper (used when fixing the composer over mobile keyboard)
   const composerWrapperRef = useRef(null);
@@ -212,6 +218,79 @@ export default function App() {
     };
   }, []);
 
+  async function releaseCurrentEngine() {
+    const currentEngine = engineRef.current;
+    if (!currentEngine) return;
+
+    try {
+      if (typeof currentEngine.interruptGenerate === "function") {
+        currentEngine.interruptGenerate();
+      }
+    } catch (err) {
+      console.warn("Failed to interrupt current generation:", err);
+    }
+
+    try {
+      if (typeof currentEngine.unload === "function") {
+        await currentEngine.unload();
+      }
+    } catch (err) {
+      console.warn("Failed to unload previous model:", err);
+    } finally {
+      engineRef.current = null;
+    }
+  }
+
+  async function maybeClearOldModelCache(previousModelId, nextModelId) {
+    if (!previousModelId || previousModelId === nextModelId) return;
+
+    const isMobileDevice =
+      deviceCapabilities?.isMobile ??
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+        navigator.userAgent
+      );
+
+    if (!isMobileDevice) return;
+
+    try {
+      const webllm = await import("@mlc-ai/web-llm");
+      if (typeof webllm.deleteModelAllInfoInCache === "function") {
+        await webllm.deleteModelAllInfoInCache(previousModelId);
+      }
+    } catch (err) {
+      // Cache cleanup is best-effort and should not block model switching.
+      console.warn("Failed to clear old model cache:", err);
+    }
+  }
+
+  // Keep chat content visible by reserving space equal to composer height on mobile.
+  useEffect(() => {
+    function updateComposerHeight() {
+      const el = composerWrapperRef.current;
+      const height = el ? Math.ceil(el.getBoundingClientRect().height) : 0;
+      document.documentElement.style.setProperty("--composer-height", `${height}px`);
+    }
+
+    updateComposerHeight();
+
+    const observer =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(updateComposerHeight)
+        : null;
+
+    if (observer && composerWrapperRef.current) {
+      observer.observe(composerWrapperRef.current);
+    }
+
+    window.addEventListener("resize", updateComposerHeight);
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateComposerHeight);
+      document.documentElement.style.removeProperty("--composer-height");
+    };
+  }, []);
+
   function updateMsg(id, patch) {
     setMessages((current) =>
       current.map((m) => (m.id === id ? { ...m, ...patch } : m))
@@ -318,6 +397,10 @@ export default function App() {
       setError("");
       setMessages([makeMsg("Bot", "Cargando modelo, por favor esperá un momento…")]);
 
+      const previousModelId = activeModelIdRef.current;
+      await releaseCurrentEngine();
+      await maybeClearOldModelCache(previousModelId, snapshot.modelId);
+
       const webllm = await import("@mlc-ai/web-llm");
       const engine = await createEngine(
         webllm,
@@ -338,6 +421,7 @@ export default function App() {
       if (cancelled) return;
 
       engineRef.current = engine;
+      activeModelIdRef.current = snapshot.modelId;
       setDownloading(false);
       if (isFirstBootstrap) {
         setIsFirstBootstrap(false);
@@ -365,6 +449,13 @@ export default function App() {
       cancelled = true;
     };
   }, [processQueue, bootKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Release GPU resources when leaving the page/app.
+  useEffect(() => {
+    return () => {
+      releaseCurrentEngine();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // submitQuestion handles both quick (text-search) and queued (model) paths.
   function submitQuestion(text) {
@@ -419,7 +510,13 @@ export default function App() {
     setSettingsOpen(false);
     
     if (needsRestart) {
-      engineRef.current = null;
+      if (typeof engineRef.current?.interruptGenerate === "function") {
+        try {
+          engineRef.current.interruptGenerate();
+        } catch (err) {
+          console.warn("Failed to interrupt generation while switching model:", err);
+        }
+      }
       processingRef.current = false;
       pendingQueueRef.current = [];
       setBootKey((k) => k + 1); // Trigger bootstrap
@@ -530,7 +627,46 @@ export default function App() {
           )}
 
           {/* Scrollable messages */}
-          <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto", px: { xs: 1, md: 2 } }}>
+          <Box
+            sx={{
+              flex: 1,
+              minHeight: 0,
+              overflowY: "auto",
+              px: { xs: 1, md: 2 },
+              pb: {
+                xs: "calc(var(--composer-height, 96px) + env(safe-area-inset-bottom, 0px))",
+                sm: 0,
+              },
+            }}
+          >
+            {(tokenInfo.contextTokens > 0 || tokenInfo.responseTokens > 0) && (
+              <Accordion
+                disableGutters
+                expanded={showTokenDetails}
+                onChange={(_, expanded) => setShowTokenDetails(expanded)}
+                sx={{
+                  mb: 1,
+                  borderRadius: 1.5,
+                  border: (theme) => `1px solid ${theme.palette.divider}`,
+                  backgroundColor: "rgba(255,255,255,0.75)",
+                  "&:before": { display: "none" },
+                }}
+              >
+                <AccordionSummary expandIcon={<ExpandMoreRoundedIcon />}>
+                  <Typography variant="body2" fontWeight={600}>
+                    Estadisticas de tokens
+                  </Typography>
+                </AccordionSummary>
+                <AccordionDetails sx={{ pt: 0 }}>
+                  <TokenCounter
+                    contextTokens={tokenInfo.contextTokens}
+                    responseTokens={tokenInfo.responseTokens}
+                    totalTokens={tokenInfo.totalTokens}
+                    maxTokens={config.contextWindowSize}
+                  />
+                </AccordionDetails>
+              </Accordion>
+            )}
             <MessageList messages={messages} />
           </Box>
 
@@ -545,10 +681,10 @@ export default function App() {
               position: { xs: 'fixed', sm: 'static' },
               left: { xs: 0 },
               right: { xs: 0 },
-              bottom: { xs: 'var(--keyboard-offset, env(safe-area-inset-bottom, 0px))' },
+              bottom: { xs: 'calc(var(--keyboard-offset, 0px) + env(safe-area-inset-bottom, 0px))' },
               zIndex: { xs: 1300 },
               backgroundColor: { xs: 'rgba(255,255,255,0.96)', sm: 'transparent' },
-              borderTop: (theme) => `1px solid ${theme.palette.divider}`,
+              borderTop: { xs: (theme) => `1px solid ${theme.palette.divider}`, sm: "none" },
             }}
           >
             <ChatComposer
@@ -560,18 +696,6 @@ export default function App() {
               onQuickQuestion={submitQuestion}
               value={question}
             />
-            
-            {/* Token Counter */}
-            {(tokenInfo.contextTokens > 0 || tokenInfo.responseTokens > 0) && (
-              <Box sx={{ mt: 1.5 }}>
-                <TokenCounter
-                  contextTokens={tokenInfo.contextTokens}
-                  responseTokens={tokenInfo.responseTokens}
-                  totalTokens={tokenInfo.totalTokens}
-                  maxTokens={config.contextWindowSize}
-                />
-              </Box>
-            )}
           </Box>
         </Card>
       </Container>

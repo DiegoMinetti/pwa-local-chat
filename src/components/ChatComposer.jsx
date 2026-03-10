@@ -43,7 +43,6 @@ export default forwardRef(function ChatComposer({ value, downloading, busy, onCh
             aria-label="Enviar"
             disabled={!canSend}
             type="submit"
-            fullWidth
             sx={{
               width: { xs: "100%", sm: 48 },
               height: 48,

@@ -22,7 +22,13 @@ export default function TokenCounter({ contextTokens, responseTokens, totalToken
         Tokens:
       </Typography>
 
-      <Stack direction="row" spacing={2} alignItems="center">
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        spacing={{ xs: 1, sm: 2 }}
+        alignItems={{ xs: "flex-start", sm: "center" }}
+        useFlexGap
+        sx={{ width: "100%" }}
+      >
         <Box>
           <Typography variant="caption" color="text.secondary">
             Contexto:
@@ -32,7 +38,7 @@ export default function TokenCounter({ contextTokens, responseTokens, totalToken
           </Typography>
         </Box>
 
-        <Box sx={{ width: "1px", height: 16, bgcolor: "divider" }} />
+        <Box sx={{ width: { xs: "100%", sm: "1px" }, height: { xs: "1px", sm: 16 }, bgcolor: "divider" }} />
 
         <Box>
           <Typography variant="caption" color="text.secondary">
@@ -43,7 +49,7 @@ export default function TokenCounter({ contextTokens, responseTokens, totalToken
           </Typography>
         </Box>
 
-        <Box sx={{ width: "1px", height: 16, bgcolor: "divider" }} />
+        <Box sx={{ width: { xs: "100%", sm: "1px" }, height: { xs: "1px", sm: 16 }, bgcolor: "divider" }} />
 
         <Box>
           <Typography variant="caption" color="text.secondary">
@@ -58,7 +64,7 @@ export default function TokenCounter({ contextTokens, responseTokens, totalToken
           </Typography>
         </Box>
 
-        <Box sx={{ width: "1px", height: 16, bgcolor: "divider" }} />
+        <Box sx={{ width: { xs: "100%", sm: "1px" }, height: { xs: "1px", sm: 16 }, bgcolor: "divider" }} />
 
         <Box>
           <Typography variant="caption" color="text.secondary">
