@@ -84,6 +84,9 @@ export default function App() {
   const [chatHistory, setChatHistory] = useState("");
   const [tokenInfo, setTokenInfo] = useState({ contextTokens: 0, responseTokens: 0, totalTokens: 0 });
 
+  // Ref for the composer wrapper (used when fixing the composer over mobile keyboard)
+  const composerWrapperRef = useRef(null);
+
   // Always-current config ref — lets callbacks read latest config without stale closures.
   const configRef = useRef(DEFAULT_CONFIG);
   configRef.current = config;
@@ -164,6 +167,50 @@ export default function App() {
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, [settingsOpen]);
+
+  // Keep composer visible above the on-screen keyboard on mobile by
+  // updating a CSS variable with the keyboard inset using visualViewport.
+  useEffect(() => {
+    function updateKeyboardOffset() {
+      try {
+        const vv = window.visualViewport;
+        if (!vv) {
+          document.documentElement.style.setProperty('--keyboard-offset', '0px');
+          return;
+        }
+
+        // When the on-screen keyboard is visible, visualViewport.height shrinks.
+        // Compute the difference between layout viewport and visual viewport.
+        const inset = Math.max(0, window.innerHeight - vv.height - (vv.offsetTop || 0));
+        document.documentElement.style.setProperty('--keyboard-offset', `${inset}px`);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    updateKeyboardOffset();
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', updateKeyboardOffset);
+      window.visualViewport.addEventListener('scroll', updateKeyboardOffset);
+    } else {
+      window.addEventListener('resize', updateKeyboardOffset);
+    }
+
+    // Also reset on blur / orientation change (keyboard dismissed)
+    window.addEventListener('orientationchange', updateKeyboardOffset);
+
+    return () => {
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', updateKeyboardOffset);
+        window.visualViewport.removeEventListener('scroll', updateKeyboardOffset);
+      } else {
+        window.removeEventListener('resize', updateKeyboardOffset);
+      }
+      window.removeEventListener('orientationchange', updateKeyboardOffset);
+      document.documentElement.style.removeProperty('--keyboard-offset');
+    };
+  }, []);
 
   function updateMsg(id, patch) {
     setMessages((current) =>
@@ -422,7 +469,7 @@ export default function App() {
           }}
         >
           {/* Header */}
-          <Box sx={{ px: { xs: 2, md: 3 }, pt: { xs: 1.75, md: 2.25 }, pb: 1.25, flexShrink: 0 }}>
+          <Box sx={{ position: 'relative', px: { xs: 2, md: 3 }, pt: { xs: 1.75, md: 2.25 }, pb: 1.25, flexShrink: 0 }}>
             <Stack
               direction={{ xs: "column", sm: "row" }}
               justifyContent="space-between"
@@ -435,7 +482,12 @@ export default function App() {
                   Asistente de Cafe Central
                 </Typography>
               </Stack>
-              <Stack direction="row" spacing={0.5} alignItems="center">
+              <Stack
+                direction="row"
+                spacing={0.5}
+                alignItems="center"
+                sx={{ position: 'absolute', top: { xs: '8px', md: '16px' }, right: { xs: '8px', md: '16px' } }}
+              >
                 <StatusPanel downloading={downloading} downloadPct={downloadPct} />
                 <Tooltip title="Configuración">
                   <IconButton
@@ -483,7 +535,22 @@ export default function App() {
           </Box>
 
           {/* Composer */}
-          <Box sx={{ px: { xs: 2, md: 3 }, pt: 1.5, pb: { xs: 2, md: 2.25 }, flexShrink: 0 }}>
+          <Box
+            ref={composerWrapperRef}
+            sx={{
+              px: { xs: 2, md: 3 },
+              pt: 1.5,
+              pb: { xs: 2, md: 2.25 },
+              flexShrink: 0,
+              position: { xs: 'fixed', sm: 'static' },
+              left: { xs: 0 },
+              right: { xs: 0 },
+              bottom: { xs: 'var(--keyboard-offset, env(safe-area-inset-bottom, 0px))' },
+              zIndex: { xs: 1300 },
+              backgroundColor: { xs: 'rgba(255,255,255,0.96)', sm: 'transparent' },
+              borderTop: (theme) => `1px solid ${theme.palette.divider}`,
+            }}
+          >
             <ChatComposer
               ref={inputRef}
               busy={busy}
@@ -505,10 +572,6 @@ export default function App() {
                 />
               </Box>
             )}
-            
-            <Typography color="text.secondary" variant="caption" sx={{ display: "block", mt: 0.75 }}>
-              Requiere HTTPS o localhost para WebGPU. Usá GitHub Pages para producción.
-            </Typography>
           </Box>
         </Card>
       </Container>

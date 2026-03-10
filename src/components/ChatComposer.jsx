@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useRef } from "react";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
-import { CircularProgress, IconButton, Stack, TextField, Tooltip } from "@mui/material";
+import { Box, CircularProgress, IconButton, Stack, TextField, Tooltip } from "@mui/material";
 
 export default forwardRef(function ChatComposer({ value, downloading, busy, onChange, onSubmit }, ref) {
   const inputRef = useRef(null);
@@ -22,7 +22,12 @@ export default forwardRef(function ChatComposer({ value, downloading, busy, onCh
   const canSend = value.trim().length > 0;
 
   return (
-    <Stack component="form" direction="row" gap={1} onSubmit={onSubmit}>
+    <Stack
+      component="form"
+      direction={{ xs: "column", sm: "row" }}
+      gap={1}
+      onSubmit={onSubmit}
+    >
       <TextField
         fullWidth
         inputRef={inputRef}
@@ -33,18 +38,20 @@ export default forwardRef(function ChatComposer({ value, downloading, busy, onCh
         onKeyDown={handleKeyDown}
       />
       <Tooltip title={downloading ? "Se enviará cuando la IA esté lista" : "Enviar (Enter)"} placement="top">
-        <span style={{ alignSelf: "center", flexShrink: 0 }}>
+        <Box sx={{ alignSelf: { xs: "stretch", sm: "center" }, flexShrink: 0 }}>
           <IconButton
             aria-label="Enviar"
             disabled={!canSend}
             type="submit"
+            fullWidth
             sx={{
-              width: 48,
+              width: { xs: "100%", sm: 48 },
               height: 48,
               bgcolor: canSend ? "primary.main" : "action.disabledBackground",
               color: canSend ? "white" : "action.disabled",
-              borderRadius: "50%",
+              borderRadius: { xs: 1, sm: "50%" },
               "&:hover": { bgcolor: "primary.dark", color: "white" },
+              px: { xs: 1 },
             }}
           >
             {busy && !downloading ? (
@@ -53,7 +60,7 @@ export default forwardRef(function ChatComposer({ value, downloading, busy, onCh
               <SendRoundedIcon />
             )}
           </IconButton>
-        </span>
+        </Box>
       </Tooltip>
     </Stack>
   );
