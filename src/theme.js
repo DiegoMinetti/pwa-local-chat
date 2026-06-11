@@ -12,6 +12,27 @@ export const appTheme = createTheme({
     secondary: {
       main: "#0f766e"
     },
+    // `lighter` es una shade custom usada por TokenCounter; sin esto el fondo no renderiza.
+    info: {
+      lighter: "#eff8ff",
+      light: "#b2ddff",
+      main: "#155eef"
+    },
+    success: {
+      lighter: "#edfcf2",
+      light: "#a6f4c5",
+      main: "#16a34a"
+    },
+    warning: {
+      lighter: "#fffaeb",
+      light: "#fedf89",
+      main: "#f79009"
+    },
+    error: {
+      lighter: "#fef3f2",
+      light: "#fda29b",
+      main: "#f04438"
+    },
     background: {
       default: "#edf2ff",
       paper: "#ffffff"

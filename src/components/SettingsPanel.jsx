@@ -436,8 +436,9 @@ export default function SettingsPanel({
                           label="Nombre del contexto"
                           value={ctx.name}
                           onChange={(e) => {
-                            const updated = [...draft.additionalContexts];
-                            updated[idx].name = e.target.value;
+                            const updated = draft.additionalContexts.map((c, i) =>
+                              i === idx ? { ...c, name: e.target.value } : c
+                            );
                             set("additionalContexts", updated);
                           }}
                           placeholder="ej: Precios, Mesas"
@@ -465,8 +466,9 @@ export default function SettingsPanel({
                         label="Contenido (JSON o texto)"
                         value={ctx.content}
                         onChange={(e) => {
-                          const updated = [...draft.additionalContexts];
-                          updated[idx].content = e.target.value;
+                          const updated = draft.additionalContexts.map((c, i) =>
+                            i === idx ? { ...c, content: e.target.value } : c
+                          );
                           set("additionalContexts", updated);
                         }}
                         placeholder="{}"
@@ -526,8 +528,9 @@ export default function SettingsPanel({
                           label="Nombre"
                           value={source.name}
                           onChange={(e) => {
-                            const updated = [...draft.dynamicSources];
-                            updated[idx].name = e.target.value;
+                            const updated = draft.dynamicSources.map((s, i) =>
+                              i === idx ? { ...s, name: e.target.value } : s
+                            );
                             set("dynamicSources", updated);
                           }}
                           placeholder="ej: Precios"
@@ -553,8 +556,9 @@ export default function SettingsPanel({
                         label="Endpoint"
                         value={source.endpoint}
                         onChange={(e) => {
-                          const updated = [...draft.dynamicSources];
-                          updated[idx].endpoint = e.target.value;
+                          const updated = draft.dynamicSources.map((s, i) =>
+                            i === idx ? { ...s, endpoint: e.target.value } : s
+                          );
                           set("dynamicSources", updated);
                         }}
                         placeholder="https://api.ejemplo.com/prices"
@@ -565,8 +569,9 @@ export default function SettingsPanel({
                           <Switch
                             checked={source.enabled !== false}
                             onChange={(e) => {
-                              const updated = [...draft.dynamicSources];
-                              updated[idx].enabled = e.target.checked;
+                              const updated = draft.dynamicSources.map((s, i) =>
+                                i === idx ? { ...s, enabled: e.target.checked } : s
+                              );
                               set("dynamicSources", updated);
                             }}
                             size="small"
