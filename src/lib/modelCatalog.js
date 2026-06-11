@@ -1,9 +1,14 @@
-export const MODEL_ID = "Phi-3.5-mini-instruct-q4f16_1-MLC";
+// Modelo principal por defecto: Qwen2.5 1.5B (~1.0 GB) — buen español y
+// descarga mucho menor que Phi-3.5 (2.4 GB), que queda como opción manual.
+export const MODEL_ID = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
 
 export const DEFAULT_FALLBACK_MODEL_IDS = [
-  "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
-  "onnx-community/Qwen2.5-1.5B-Instruct",
+  // WebGPU: opción más liviana si el modelo principal no entra en la GPU.
+  "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
+  // CPU/WASM (sin WebGPU): primero el 0.5B (~0.79 GB) por su buen español,
+  // y como último recurso el SmolLM2 360M (~0.39 GB), la descarga más liviana.
   "onnx-community/Qwen2.5-0.5B-Instruct",
+  "HuggingFaceTB/SmolLM2-360M-Instruct",
 ];
 
 export const AVAILABLE_MODELS = [
@@ -68,12 +73,36 @@ export const AVAILABLE_MODELS = [
     minMemoryGB: { webgpu: 4, wasm: Infinity },
   },
   {
+    id: "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
+    runtime: "webllm",
+    providerModelId: "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
+    label: "Qwen2.5 0.5B",
+    family: "Qwen",
+    size: "~0.35 GB",
+    description: "Muy liviano y muy rápido en WebGPU, con buen español.",
+    requiresWebGPU: true,
+    preferredBackend: "webgpu",
+    minMemoryGB: { webgpu: 1.5, wasm: Infinity },
+  },
+  {
+    id: "SmolLM2-360M-Instruct-q4f16_1-MLC",
+    runtime: "webllm",
+    providerModelId: "SmolLM2-360M-Instruct-q4f16_1-MLC",
+    label: "SmolLM2 360M",
+    family: "SmolLM",
+    size: "~0.25 GB",
+    description: "El más liviano en WebGPU; ideal para equipos modestos.",
+    requiresWebGPU: true,
+    preferredBackend: "webgpu",
+    minMemoryGB: { webgpu: 1, wasm: Infinity },
+  },
+  {
     id: "onnx-community/Qwen2.5-1.5B-Instruct",
     runtime: "transformers",
     providerModelId: "onnx-community/Qwen2.5-1.5B-Instruct",
     label: "Qwen2.5 1.5B ONNX",
     family: "Qwen",
-    size: "CPU/WASM ~1.5B",
+    size: "CPU/WASM ~1.79 GB",
     description: "Fallback de mayor calidad cuando WebGPU no está disponible.",
     requiresWebGPU: false,
     preferredBackend: "wasm",
@@ -87,13 +116,27 @@ export const AVAILABLE_MODELS = [
     providerModelId: "onnx-community/Qwen2.5-0.5B-Instruct",
     label: "Qwen2.5 0.5B ONNX",
     family: "Qwen",
-    size: "CPU/WASM ~0.5B",
-    description: "Fallback más rápido para CPU y móviles.",
+    size: "CPU/WASM ~0.79 GB",
+    description: "Fallback equilibrado para CPU y móviles, buen español.",
     requiresWebGPU: false,
     preferredBackend: "wasm",
     allowedBackends: ["webgpu", "wasm"],
     dtypeByBackend: { webgpu: "q4", wasm: "q4" },
     minMemoryGB: { webgpu: 2, wasm: 2 },
+  },
+  {
+    id: "HuggingFaceTB/SmolLM2-360M-Instruct",
+    runtime: "transformers",
+    providerModelId: "HuggingFaceTB/SmolLM2-360M-Instruct",
+    label: "SmolLM2 360M ONNX",
+    family: "SmolLM",
+    size: "CPU/WASM ~0.39 GB",
+    description: "Descarga más liviana para CPU; español básico pero rápido.",
+    requiresWebGPU: false,
+    preferredBackend: "wasm",
+    allowedBackends: ["webgpu", "wasm"],
+    dtypeByBackend: { webgpu: "q4", wasm: "q4" },
+    minMemoryGB: { webgpu: 1.5, wasm: 1.5 },
   },
 ];
 

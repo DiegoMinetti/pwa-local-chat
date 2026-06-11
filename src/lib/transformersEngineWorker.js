@@ -39,7 +39,7 @@ async function disposeCurrentGenerator() {
   currentBackend = null;
 }
 
-async function loadModel({ modelId, preferredBackend }) {
+async function loadModel({ modelId, preferredBackend }, onProgress) {
   const model = getModelById(modelId);
   if (!model) {
     throw new Error(`Modelo no soportado: ${modelId}`);
@@ -54,14 +54,46 @@ async function loadModel({ modelId, preferredBackend }) {
   const dtype = model.dtypeByBackend?.[backend] || "q4";
 
   if (currentGenerator && currentModel === modelId && currentBackend === backend) {
+    onProgress?.(1);
     return { modelId, backend };
   }
 
   await disposeCurrentGenerator();
+
+  // Aggregate per-file download progress so the UI shows real movement
+  // instead of a frozen 0% during the (large, ~hundreds of MB) download.
+  const fileProgress = new Map();
+  const reportAggregate = () => {
+    let loaded = 0;
+    let total = 0;
+    for (const entry of fileProgress.values()) {
+      loaded += entry.loaded || 0;
+      total += entry.total || 0;
+    }
+    if (total > 0) {
+      onProgress?.(Math.min(0.99, loaded / total));
+    }
+  };
+
   currentGenerator = await pipeline("text-generation", model.providerModelId, {
     device: backend,
     dtype,
+    progress_callback: (event) => {
+      if (!event) return;
+      if ((event.status === "progress" || event.status === "download") && event.file) {
+        fileProgress.set(event.file, {
+          loaded: event.loaded ?? 0,
+          total: event.total ?? 0,
+        });
+        reportAggregate();
+      } else if (event.status === "done" && event.file) {
+        const entry = fileProgress.get(event.file);
+        if (entry && entry.total) entry.loaded = entry.total;
+        reportAggregate();
+      }
+    },
   });
+  onProgress?.(1);
   currentModel = modelId;
   currentBackend = backend;
 
@@ -104,7 +136,9 @@ self.onmessage = async (event) => {
   try {
     if (type === "load") {
       self.postMessage({ type: "progress", id, payload: { progress: 0 } });
-      const result = await loadModel(payload);
+      const result = await loadModel(payload, (progress) => {
+        self.postMessage({ type: "progress", id, payload: { progress } });
+      });
       self.postMessage({ type: "progress", id, payload: { progress: 1 } });
       self.postMessage({ type: "result", id, payload: result });
       return;
