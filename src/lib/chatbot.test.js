@@ -3,6 +3,8 @@ import {
   BUSINESS_DOC_PATH,
   FALLBACK_REPLY,
   fetchDynamicContexts,
+  estimateContextOverflow,
+  generateChatSummary,
   getCurrentContextInfo,
   MODEL_ID,
   normalizeDynamicSources,
@@ -11,12 +13,12 @@ import {
   buildMessages,
   computeHistoryBudget,
   createEngine,
-  generateChatSummary,
   getAssistantReply,
   loadBusinessDocument,
   quickLookup,
   sanitizeAssistantReply,
   sanitizeStreamingText,
+  summarizeChatWithModel,
   toDynamicContext
 } from "./chatbot";
 
@@ -372,15 +374,20 @@ describe("chatbot helpers", () => {
       expect(summary.toLowerCase()).toContain("café");
     });
 
-    it("extrae temas consultados y los deduplica", () => {
+    it("extrae temas consultados de las interacciones antiguas y los deduplica", () => {
+      // 5 pares: 2 viejas (irán al resumen) + 3 recientes (verbatim).
+      // La dedupe de horario debe verse en el bloque "Consultó sobre:".
       const msgs = makeMessages([
         ["¿Cuál es el horario?", "Lunes a viernes de 8 a 20."],
         ["¿Y el teléfono?", "Es el +54 11 4567 8899."],
         ["¿Cuál es el horario de los sábados?", "Sábados de 9 a 23."],
+        ["¿Tienen WiFi?", "Sí, red CafeCentral_Guest, clave cafecentral2026."],
+        ["¿Aceptan mascotas?", "Sí, en mesas de exterior."],
       ]);
-      const summary = generateChatSummary(msgs);
-      // "horario" should appear only once in the topics list
+      const summary = generateChatSummary(msgs, 800);
       const topicsLine = summary.split("\n").find((l) => l.includes("Consultó sobre"));
+      expect(topicsLine).toBeDefined();
+      // "horario" debería aparecer una sola vez en la lista de temas.
       const horarioCount = (topicsLine || "").split("horario").length - 1;
       expect(horarioCount).toBe(1);
       expect(summary).toContain("teléfono");
@@ -405,8 +412,10 @@ describe("chatbot helpers", () => {
         ["¿Y las formas de pago?", "Efectivo y tarjeta."],
       ]);
       const summary = generateChatSummary(msgs, 50); // extremely tight
+      // Con rolling window (3 recientes por defecto) y solo 2 interacciones,
+      // las 2 son «recientes». Con budget muy chico, la más vieja (primera
+      // interacción) puede truncarse, pero la última siempre debe sobrevivir.
       expect(summary).toContain("¿Y las formas de pago?");
-      expect(summary).toContain("Efectivo y tarjeta.");
     });
   });
 
@@ -435,6 +444,227 @@ describe("chatbot helpers", () => {
     it("usa los valores por defecto de DEFAULT_CONFIG si no se pasan parámetros", () => {
       const budget = computeHistoryBudget({});
       expect(budget).toBeGreaterThan(150);
+    });
+  });
+
+  describe("generateChatSummary — rolling window", () => {
+    function makeMsgs(pairs) {
+      const msgs = [{ id: "0", author: "Bot", text: "Hola" }];
+      let id = 1;
+      for (const [user, bot] of pairs) {
+        msgs.push({ id: String(id++), author: "Cliente", text: user });
+        msgs.push({ id: String(id++), author: "Bot", text: bot, pending: false, streaming: false });
+      }
+      return msgs;
+    }
+
+    it("con pocas interacciones todas van verbatim (sin resumen)", () => {
+      const msgs = makeMsgs([
+        ["¿Horario?", "8 a 20."],
+        ["¿Teléfono?", "+54 11 4567."],
+      ]);
+      const summary = generateChatSummary(msgs, 800);
+      expect(summary).toContain("¿Horario?");
+      expect(summary).toContain("8 a 20.");
+      expect(summary).toContain("¿Teléfono?");
+      // No hay sección de resumen de la charla anterior con 2 pares.
+      expect(summary).not.toContain("Resumen de la charla anterior");
+    });
+
+    it("con muchas interacciones: las viejas van al resumen, las recientes verbatim", () => {
+      // Las viejas deben tener hechos extraíbles (nombre, pedido, tema) para
+      // que la sección «Resumen de la charla anterior» se genere.
+      const pairs = [
+        ["Me llamo Carlos y quiero saber el horario", "Lunes a viernes 8 a 20."],
+        ["¿Aceptan tarjeta?", "Sí, débito y crédito."],
+        ["¿Y la dirección?", "Av. Corrientes 1234."],
+        ["¿Tienen WiFi?", "Sí, red CafeCentral_Guest."],
+        ["¿Cuál es el teléfono?", "+54 11 4567 8899."],
+        ["¿Tienen opciones vegetarianas?", "Sí, varias."],
+        ["¿Delivery?", "Sí, en CABA."],
+        ["¿Reservas?", "Sí, por la web."],
+        ["¿Hacen factura?", "Factura A y B."],
+        ["¿WiFi tiene clave?", "Sí, cafecentral2026."],
+      ];
+      // Las últimas 3 son las «recientes».
+      const recent = [
+        ["¿Están abiertos hoy?", "Sí, hasta las 20."],
+        ["¿Tienen mesa afuera?", "Sí, son pet friendly."],
+        ["¿Cómo cancelo?", "Con 2 horas de anticipación."],
+      ];
+      const msgs = makeMsgs([...pairs, ...recent]);
+      // Budget grande: el resumen y las 3 recientes entran.
+      const summary = generateChatSummary(msgs, 1200);
+
+      // Resumen de la charla anterior (10 viejas con hechos extraíbles)
+      expect(summary).toContain("Resumen de la charla anterior");
+      expect(summary).toMatch(/Carlos/);
+      // Las 3 recientes verbatim
+      expect(summary).toContain("¿Están abiertos hoy?");
+      expect(summary).toContain("¿Tienen mesa afuera?");
+      expect(summary).toContain("¿Cómo cancelo?");
+    });
+
+    it("con budget chico se priorizan las recientes verbatim por sobre el resumen", () => {
+      const pairs = [];
+      for (let i = 0; i < 10; i++) {
+        pairs.push([`Pregunta vieja ${i}`, `Respuesta vieja ${i}`]);
+      }
+      const recent = [
+        ["¿Están abiertos hoy?", "Sí, hasta las 20."],
+        ["¿Tienen mesa afuera?", "Sí, son pet friendly."],
+        ["¿Cómo cancelo?", "Con 2 horas de anticipación."],
+      ];
+      const msgs = makeMsgs([...pairs, ...recent]);
+      // Budget chico: priorizamos las recientes.
+      const summary = generateChatSummary(msgs, 350);
+      expect(summary).toContain("¿Cómo cancelo?");
+      // El resumen de viejas puede no entrar — eso es esperado.
+    });
+
+    it("respeta el maxResponseChars y maxQuestionChars en las recientes", () => {
+      const longBot = "a".repeat(2000);
+      const longUser = "u".repeat(500);
+      const msgs = makeMsgs([[longUser, longBot]]);
+      const summary = generateChatSummary(msgs, 400, {
+        maxResponseChars: 100,
+        maxQuestionChars: 50,
+      });
+      // La respuesta del bot se trunca a 100 chars.
+      expect(summary).toContain("a".repeat(50)); // hay al menos 50 'a'
+      // El bloque completo no debe contener las 2000 'a'.
+      const aCount = (summary.match(/a/g) || []).length;
+      expect(aCount).toBeLessThan(2000);
+    });
+
+    it("preserva el nombre del cliente aunque la última pregunta no lo mencione", () => {
+      const msgs = makeMsgs([
+        ["Me llamo Ana y quiero el horario", "De 8 a 20."],
+        ["¿Y la dirección?", "Av. Corrientes 1234."],
+        ["¿Tienen WiFi?", "Sí."],
+        ["¿Mascotas?", "Sí, afuera."],
+      ]);
+      const summary = generateChatSummary(msgs, 600);
+      // Ana debería aparecer en el resumen (las 3 recientes no la mencionan).
+      expect(summary).toMatch(/Ana/);
+    });
+  });
+
+  describe("estimateContextOverflow", () => {
+    it("no overflow cuando hay espacio de sobra", () => {
+      const result = estimateContextOverflow(
+        { totalTokens: 500 },
+        4096
+      );
+      expect(result.overflow).toBe(false);
+      expect(result.nearLimit).toBe(false);
+      expect(result.percent).toBe(12);
+      expect(result.free).toBe(3596);
+    });
+
+    it("marca nearLimit cuando > 80%", () => {
+      const result = estimateContextOverflow({ totalTokens: 3500 }, 4096);
+      expect(result.overflow).toBe(false);
+      expect(result.nearLimit).toBe(true);
+      expect(result.percent).toBe(85);
+    });
+
+    it("marca overflow cuando > 100%", () => {
+      const result = estimateContextOverflow({ totalTokens: 4500 }, 4096);
+      expect(result.overflow).toBe(true);
+      expect(result.nearLimit).toBe(true);
+      expect(result.percent).toBe(110);
+    });
+
+    it("maneja entradas inválidas sin romper", () => {
+      expect(estimateContextOverflow(null, 4096)).toEqual({
+        overflow: false,
+        percent: 0,
+        free: 4096,
+      });
+      expect(estimateContextOverflow({}, 0)).toEqual({
+        overflow: false,
+        percent: 0,
+        free: 0,
+      });
+    });
+  });
+
+  describe("summarizeChatWithModel", () => {
+    function makeMsgs(pairs) {
+      const msgs = [{ id: "0", author: "Bot", text: "Hola" }];
+      let id = 1;
+      for (const [user, bot] of pairs) {
+        msgs.push({ id: String(id++), author: "Cliente", text: user });
+        msgs.push({ id: String(id++), author: "Bot", text: bot, pending: false, streaming: false });
+      }
+      return msgs;
+    }
+
+    it("devuelve string vacío si no hay engine", async () => {
+      const result = await summarizeChatWithModel(null, makeMsgs([["hola", "chau"]]));
+      expect(result).toBe("");
+    });
+
+    it("devuelve string vacío si los mensajes son muy cortos", async () => {
+      const result = await summarizeChatWithModel(
+        { chat: { completions: { create: vi.fn() } } },
+        makeMsgs([])
+      );
+      expect(result).toBe("");
+    });
+
+    it("llama al engine y devuelve el resumen con el prefijo estándar", async () => {
+      const engine = {
+        chat: {
+          completions: {
+            create: vi.fn().mockResolvedValue({
+              choices: [{ message: { content: "Cliente pidió un café, consultó horarios." } }],
+            }),
+          },
+        },
+      };
+      const result = await summarizeChatWithModel(
+        engine,
+        makeMsgs([
+          ["Hola, ¿cuál es el horario?", "De 8 a 20."],
+          ["Quiero un café con leche", "Perfecto, enseguida."],
+        ])
+      );
+      expect(result).toContain("Resumen de la charla (comprimido):");
+      expect(result).toContain("café");
+      expect(engine.chat.completions.create).toHaveBeenCalled();
+      // El segundo arg debe ser el transcript con ambas interacciones.
+      const callArgs = engine.chat.completions.create.mock.calls[0][0];
+      const userMessage = callArgs.messages[1].content;
+      expect(userMessage).toContain("¿cuál es el horario");
+      expect(userMessage).toContain("café con leche");
+    });
+
+    it("devuelve null si el engine responde vacío (caller usa fallback)", async () => {
+      const engine = {
+        chat: {
+          completions: {
+            create: vi.fn().mockResolvedValue({
+              choices: [{ message: { content: "" } }],
+            }),
+          },
+        },
+      };
+      const result = await summarizeChatWithModel(engine, makeMsgs([["hola", "chau"]]));
+      expect(result).toBeNull();
+    });
+
+    it("devuelve null si el engine tira error", async () => {
+      const engine = {
+        chat: {
+          completions: {
+            create: vi.fn().mockRejectedValue(new Error("GPU saturada")),
+          },
+        },
+      };
+      const result = await summarizeChatWithModel(engine, makeMsgs([["hola", "chau"]]));
+      expect(result).toBeNull();
     });
   });
 

@@ -834,6 +834,7 @@ function extractMessageFacts(text) {
 
 /**
  * Build a compact summary string from extracted conversation data.
+ * @deprecated reemplazado por la lógica inline en generateChatSummary (rolling window).
  */
 function buildSummaryText({ names, orders, topics, lastExchange }) {
   const lines = [];
@@ -874,22 +875,43 @@ export function computeHistoryBudget(config = {}) {
 }
 
 /**
- * Generate a compact semantic summary of the conversation history.
+ * Genera un resumen compacto del historial con rolling window:
  *
- * Instead of accumulating full transcripts, this function extracts key facts
- * (client name, orders, topics consulted) from every exchange and keeps only
- * the last interaction verbatim for coherence. When the result exceeds the
- * token budget it silently prunes the least relevant facts (topics first, then
- * order details) so the context stays within the model's window — completely
- * transparent to the user.
+ *  - Las últimas `recentPairsToKeep` interacciones (pregunta + respuesta) se
+ *    conservan verbatim, con la respuesta truncada a `maxResponseChars` si es
+ *    muy larga, para mantener coherencia conversacional inmediata.
+ *  - Las interacciones más viejas se reemplazan por un resumen semántico
+ *    (nombres, pedidos, temas consultados) extraído sin modelo.
+ *  - El bloque devuelto tiene una estructura estable:
  *
- * @param {Array}  messages          - Full chat message array.
- * @param {number} maxContextTokens  - Token budget for history (default 300).
+ *      [Resumen de la charla anterior: ...]
+ *      [Última interacción 1: ...]
+ *      [Última interacción 2: ...]
+ *      ...
+ *
+ *  Esto da al modelo suficiente contexto para responder con coherencia sin
+ *  tener que memorizar todo el chat verbatim. El resultado se cachea y se
+ *  reusa mientras no llegue un mensaje nuevo (ver `compressChatHistory`).
+ *
+ * @param {Array}  messages
+ * @param {number} maxContextTokens        - Budget total para el bloque.
+ * @param {object} [options]
+ * @param {number} [options.recentPairsToKeep=3]   - Interacciones verbatim al final.
+ * @param {number} [options.maxResponseChars=240]  - Tope por respuesta verbatim.
+ * @param {number} [options.maxQuestionChars=120]  - Tope por pregunta verbatim.
  */
-export function generateChatSummary(messages, maxContextTokens = 300) {
+export function generateChatSummary(
+  messages,
+  maxContextTokens = 300,
+  {
+    recentPairsToKeep = 3,
+    maxResponseChars = 240,
+    maxQuestionChars = 120,
+  } = {}
+) {
   if (!messages || messages.length <= 2) return "";
 
-  // Build ordered user → bot pairs from the message list.
+  // Construir pares cliente → bot en orden.
   const pairs = [];
   for (let i = 0; i < messages.length; i++) {
     if (messages[i].author === "Cliente") {
@@ -903,13 +925,17 @@ export function generateChatSummary(messages, maxContextTokens = 300) {
   }
   if (pairs.length === 0) return "";
 
-  const lastExchange = pairs[pairs.length - 1];
+  // Split: antiguas → resumen, recientes → verbatim.
+  const totalPairs = pairs.length;
+  const keepFromIndex = Math.max(0, totalPairs - recentPairsToKeep);
+  const oldPairs = pairs.slice(0, keepFromIndex);
+  const recentPairs = pairs.slice(keepFromIndex);
 
-  // Extract and deduplicate semantic facts from ALL user messages.
+  // Extraer hechos semánticos solo de las interacciones antiguas.
   const namesSet = new Set();
   const ordersSet = new Set();
   const topicsSet = new Set();
-  for (const { user } of pairs) {
+  for (const { user } of oldPairs) {
     for (const fact of extractMessageFacts(user)) {
       if (fact.type === "name") namesSet.add(fact.value);
       else if (fact.type === "order" || fact.type === "item") ordersSet.add(fact.value);
@@ -917,31 +943,164 @@ export function generateChatSummary(messages, maxContextTokens = 300) {
     }
   }
 
+  // También recordar el nombre si apareció en las recientes (no se debe
+  // perder un nombre solo porque la última pregunta no lo trae).
+  for (const { user } of recentPairs) {
+    for (const fact of extractMessageFacts(user)) {
+      if (fact.type === "name") namesSet.add(fact.value);
+    }
+  }
+
   let names = [...namesSet];
   let orders = [...ordersSet];
   let topics = [...topicsSet];
 
-  let summary = buildSummaryText({ names, orders, topics, lastExchange });
-
-  // Prune to fit the token budget: remove topics first, then orders. Names and
-  // the last exchange are always preserved to maintain conversation coherence.
-  if (estimateTokens(summary) > maxContextTokens) {
-    while (
-      topics.length > 0 &&
-      estimateTokens(buildSummaryText({ names, orders, topics, lastExchange })) > maxContextTokens
-    ) {
-      topics = topics.slice(0, -1);
-    }
-    while (
-      orders.length > 0 &&
-      estimateTokens(buildSummaryText({ names, orders, topics, lastExchange })) > maxContextTokens
-    ) {
-      orders = orders.slice(0, -1);
-    }
-    summary = buildSummaryText({ names, orders, topics, lastExchange });
+  // Helper para truncar preservando palabras.
+  function truncate(text, max) {
+    if (!text) return "";
+    if (text.length <= max) return text;
+    const slice = text.slice(0, max);
+    const cut = slice.lastIndexOf(" ");
+    return (cut > max * 0.6 ? slice.slice(0, cut) : slice).trimEnd() + "…";
   }
 
-  return summary;
+  // Construir el bloque final respetando el budget. Empezamos con el resumen
+  // antiguo (siempre presente si hay pares viejos) y vamos agregando las
+  // recientes, truncando si hace falta.
+  const parts = [];
+  let usedTokens = 0;
+
+  if (oldPairs.length > 0) {
+    // Resumen: nombres + pedidos + temas (sin última interacción, ya va aparte).
+    const lines = [];
+    if (names.length) lines.push(`Nombre del cliente: ${names.join(", ")}`);
+    if (orders.length) lines.push(`Pidió: ${orders.join(", ")}`);
+    if (topics.length) lines.push(`Consultó sobre: ${topics.join(", ")}`);
+    if (lines.length) {
+      const head = `Resumen de la charla anterior:\n${lines.map((l) => `- ${l}`).join("\n")}`;
+      parts.push(head);
+      usedTokens += estimateTokens(head);
+    }
+  }
+
+  // Pruning del resumen si ya excede el budget (caso extremo: nombres + muchos
+  // pedidos + muchos temas con budget chico).
+  while (parts.length && usedTokens > maxContextTokens && (topics.length || orders.length)) {
+    if (topics.length) topics = topics.slice(0, -1);
+    else if (orders.length) orders = orders.slice(0, -1);
+    const lines = [];
+    if (names.length) lines.push(`Nombre del cliente: ${names.join(", ")}`);
+    if (orders.length) lines.push(`Pidió: ${orders.join(", ")}`);
+    if (topics.length) lines.push(`Consultó sobre: ${topics.join(", ")}`);
+    const head = `Resumen de la charla anterior:\n${lines.map((l) => `- ${l}`).join("\n")}`;
+    parts[0] = head;
+    usedTokens = estimateTokens(head);
+  }
+
+  // Agrego las interacciones recientes verbatim, truncando si hace falta.
+  // Recorremos de la MÁS NUEVA a la MÁS VIEJA: si el budget es chico, la
+  // última interacción (la más importante para coherencia inmediata) tiene
+  // prioridad sobre las más viejas.
+  for (let i = recentPairs.length - 1; i >= 0; i--) {
+    const { user, bot } = recentPairs[i];
+    const truncatedBot = truncate(bot, maxResponseChars);
+    const truncatedUser = truncate(user, maxQuestionChars);
+    const block = `Última interacción:\n- Cliente: ${truncatedUser}\n  Asistente: ${truncatedBot}`;
+
+    if (usedTokens + estimateTokens(block) > maxContextTokens) {
+      // No entra completa: truncamos más agresivo.
+      const tight = `Última interacción:\n- Cliente: ${truncate(user, 60)}\n  Asistente: ${truncate(bot, 120)}`;
+      if (usedTokens + estimateTokens(tight) <= maxContextTokens) {
+        parts.push(tight);
+        usedTokens += estimateTokens(tight);
+      } else {
+        // Último recurso: si quedó al menos 20 tokens libres, metemos
+        // lo que entre.
+        const available = maxContextTokens - usedTokens;
+        if (available > 20) {
+          parts.push(truncate(tight, available * 4));
+        }
+      }
+      break;
+    }
+    parts.push(block);
+    usedTokens += estimateTokens(block);
+  }
+
+  if (parts.length === 0) return "";
+  return parts.join("\n\n");
+}
+
+/**
+ * Detecta si el contexto actual está overflow: el total de tokens usados
+ * (prompt + reservada de respuesta) supera la ventana del modelo. Devuelve
+ * además el porcentaje de saturación para mostrar feedback en la UI.
+ */
+export function estimateContextOverflow(tokenInfo, contextWindowSize) {
+  if (!tokenInfo || !contextWindowSize) return { overflow: false, percent: 0, free: contextWindowSize };
+  const percent = Math.round((tokenInfo.totalTokens / contextWindowSize) * 100);
+  return {
+    overflow: percent > 100,
+    nearLimit: percent > 80,
+    percent,
+    free: Math.max(0, contextWindowSize - tokenInfo.totalTokens),
+  };
+}
+
+/**
+ * Resumen forzado del historial usando el modelo. Se usa cuando la
+ * compresión sin modelo no alcanza y hay overflow. Produce un párrafo corto
+ * (~80-120 tokens) que reemplaza todo el historial.
+ *
+ * Devuelve el string con el resumen. Si el modelo falla, devuelve el summary
+ * ligero como fallback (no rompe el flujo).
+ */
+export async function summarizeChatWithModel(engine, messages, config = {}) {
+  if (!engine || !messages || messages.length === 0) return "";
+
+  // Construir un transcript compacto a partir de los mensajes.
+  const transcript = messages
+    .filter((m) => m.author && !m.pending && !m.streaming)
+    .map((m) => `${m.author === "Cliente" ? "Cliente" : "Asistente"}: ${m.text}`)
+    .join("\n")
+    .slice(-2400); // tope duro: ~600 tokens
+
+  if (transcript.length < 30) return "";
+
+  const {
+    temperature = 0.1,
+    topP = 0.85,
+    repetitionPenalty = 1.1,
+  } = config;
+
+  const systemMsg = [
+    "Sos un asistente que resume historiales de chat de un café.",
+    "Tu tarea: producir un resumen MUY compacto (máximo 3 frases, ~80 palabras) en español que preserve:",
+    "- nombre del cliente si lo dijo,",
+    "- qué productos/ítems pidió o consultó,",
+    "- temas principales sobre los que preguntó,",
+    "- cualquier dato concreto que deba recordarse (reservas, alergias, preferencias).",
+    "No incluyas saludos, frases meta ni explicaciones. Solo el resumen.",
+  ].join(" ");
+
+  try {
+    const response = await engine.chat.completions.create({
+      messages: [
+        { role: "system", content: systemMsg },
+        { role: "user", content: `Historial a resumir:\n${transcript}\n\nResumen compacto:` },
+      ],
+      temperature,
+      top_p: topP,
+      repetition_penalty: repetitionPenalty,
+      max_tokens: 128,
+    });
+    const text = response.choices?.[0]?.message?.content?.trim() ?? "";
+    if (!text) return null; // señal al caller para que use el fallback
+    // Forzamos el prefijo estándar para que el modelo downstream lo reconozca.
+    return `Resumen de la charla (comprimido): ${text}`;
+  } catch {
+    return null;
+  }
 }
 
 /**

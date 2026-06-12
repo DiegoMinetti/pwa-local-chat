@@ -11,10 +11,12 @@ import {
   Chip,
   Container,
   IconButton,
+  Snackbar,
   Stack,
   Tooltip,
   Typography,
 } from "@mui/material";
+import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import ChatComposer from "./components/ChatComposer";
 import MessageList from "./components/MessageList";
 import SettingsPanel from "./components/SettingsPanel";
@@ -27,6 +29,7 @@ import {
   calculateMessagesTokens,
   computeHistoryBudget,
   createEngine,
+  estimateContextOverflow,
   estimateTokens,
   fetchDynamicContexts,
   generateChatSummary,
@@ -37,6 +40,7 @@ import {
   streamAssistantReply,
   SUGGESTED_QUESTIONS,
   summarizeBusinessInfo,
+  summarizeChatWithModel,
 } from "./lib/chatbot";
 import { getConfiguredModelIds, getModelById, getRuntimeLabel } from "./lib/modelCatalog";
 
@@ -92,6 +96,9 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [loadingModelInfo, setLoadingModelInfo] = useState(null); // { label, size }
   const [chatHistory, setChatHistory] = useState("");
+  const [compressionNotice, setCompressionNotice] = useState(""); // toast de auto-compresión
+  const messagesRef = useRef(null); // snapshot de messages para compresión async
+  messagesRef.current = messages;
   const [tokenInfo, setTokenInfo] = useState({ contextTokens: 0, responseTokens: 0, totalTokens: 0 });
   const [showTokenDetails, setShowTokenDetails] = useState(false);
 
@@ -120,6 +127,14 @@ export default function App() {
     });
     setTokenInfo(tokens);
   }, [question, config, chatHistory]);
+
+  // Auto-clear del aviso de compresión después de 4s. Lo separamos del
+  // setCompressionNotice para que el clear sea independiente del flujo.
+  useEffect(() => {
+    if (!compressionNotice) return undefined;
+    const t = setTimeout(() => setCompressionNotice(""), 4000);
+    return () => clearTimeout(t);
+  }, [compressionNotice]);
 
   // Global keyboard capture: focus input and capture first keystroke if not already focused
   useEffect(() => {
@@ -300,6 +315,85 @@ export default function App() {
     );
   }
 
+  // Ref para evitar que se acumulen compresiones con modelo concurrentes.
+  const compressingRef = useRef(false);
+
+  /**
+   * Recalcula el resumen del historial. Estrategia híbrida:
+   *  1. Genera un resumen ligero con rolling window (sin modelo).
+   *  2. Si el total de tokens (con ese resumen) entra en la ventana, lo aplica.
+   *  3. Si NO entra, dispara una compresión con modelo en background
+   *     (summarizeChatWithModel) y actualiza el historial cuando termina.
+   *  4. Si la compresión con modelo falla, deja el resumen ligero igual.
+   *
+   * Devuelve una promesa que se resuelve cuando el resumen ligero está listo;
+   * la compresión con modelo puede completarse después.
+   */
+  const refreshChatHistory = useCallback(async ({ messagesAfter = null, forceModel = false } = {}) => {
+    // 1. Resumen ligero (rolling window) con budget dinámico.
+    const budget = computeHistoryBudget(configRef.current);
+    const baseSummary = generateChatSummary(
+      messagesAfter,
+      budget,
+      { recentPairsToKeep: 3, maxResponseChars: 240, maxQuestionChars: 120 }
+    );
+    setChatHistory(baseSummary);
+    chatHistoryRef.current = baseSummary;
+
+    // 2. Chequeo de overflow con el resumen ya aplicado.
+    const tokensAfter = calculateMessagesTokens({
+      systemPrompt: configRef.current.systemPrompt,
+      businessInfo: configRef.current.businessInfo,
+      question: "",
+      chatHistory: baseSummary,
+      additionalContexts: configRef.current.additionalContexts || [],
+      responseLength: configRef.current.maxTokens,
+      contextWindowSize: configRef.current.contextWindowSize,
+    });
+    const overflow = estimateContextOverflow(tokensAfter, configRef.current.contextWindowSize);
+
+    // Si no hay overflow y no nos forzaron, listo.
+    if (!overflow.overflow && !forceModel) return;
+
+    // 3. Overflow → compresión con modelo. Guard contra re-entry.
+    if (compressingRef.current) return;
+    compressingRef.current = true;
+
+    // Tomamos snapshot de los mensajes para el modelo.
+    const snapshot = messagesAfter
+      ? messagesAfter
+      : // Si no se pasaron, leemos el state actual vía closure (best effort).
+        null;
+
+    // Si no tenemos snapshot directo, hacemos una lectura no-reactiva vía
+    // el ref. Necesitamos que `messagesRef` exista; lo creamos a continuación.
+    const msgsForModel = snapshot ?? messagesRef.current;
+
+    summarizeChatWithModel(engineRef.current, msgsForModel, {
+      temperature: 0.1,
+      topP: 0.85,
+      repetitionPenalty: 1.1,
+    })
+      .then((compressed) => {
+        if (compressed) {
+          setChatHistory(compressed);
+          chatHistoryRef.current = compressed;
+          // Toast sutil: el usuario ve que pasó algo.
+          setCompressionNotice("Contexto comprimido para liberar espacio.");
+        } else {
+          // El modelo falló → mantenemos el ligero. Igual avisamos que intentamos.
+          setCompressionNotice("No se pudo comprimir con el modelo; se mantuvo resumen ligero.");
+        }
+      })
+      .catch(() => {
+        // Silencioso: el resumen ligero ya está aplicado.
+      })
+      .finally(() => {
+        compressingRef.current = false;
+        // Auto-clear del aviso después de unos segundos (lo hace el componente).
+      });
+  }, []);
+
   const processQueue = useCallback(async () => {
     if (processingRef.current || !engineRef.current) return;
     processingRef.current = true;
@@ -357,11 +451,15 @@ export default function App() {
         // Show complete sanitized text and stop streaming flag (drops the caret).
         updateMsg(botMsgId, { text: finalText, streaming: false });
 
-        // Update chat history after bot responds
+        // Compresión de historial (ligera + overflow check + forzada con
+        // modelo si hace falta). El cálculo es local y sincrónico; la
+        // compresión con modelo es async pero corre en background y actualiza
+        // el historial cuando termina, sin trabar la próxima pregunta.
         setMessages((current) => {
-          const newHistory = generateChatSummary(current, computeHistoryBudget(configRef.current));
-          setChatHistory(newHistory);
-          chatHistoryRef.current = newHistory;
+          // Calculamos el resumen sobre la lista YA actualizada con la
+          // respuesta del bot. Devolvemos `current` sin modificar para no
+          // causar un re-render extra.
+          refreshChatHistory({ messagesAfter: current, forceModel: false });
           return current;
         });
       } catch (err) {
@@ -578,9 +676,8 @@ export default function App() {
       if (quick) {
         setMessages((current) => {
           const next = [...current, makeMsg("Cliente", cleanQuestion), makeMsg("Bot", quick)];
-          const newHistory = generateChatSummary(next, computeHistoryBudget(configRef.current));
-          setChatHistory(newHistory);
-          chatHistoryRef.current = newHistory;
+          // Comprimir historial (ligero + check overflow con modelo).
+          refreshChatHistory({ messagesAfter: next, forceModel: false });
           return next;
         });
         return;
@@ -866,6 +963,26 @@ export default function App() {
         onSummarize={async (rawText) => {
           if (!engineRef.current) throw new Error("Modelo no cargado");
           return summarizeBusinessInfo(engineRef.current, rawText, configRef.current);
+        }}
+      />
+      {/* Toast sutil cuando el historial se auto-comprime con el modelo. */}
+      <Snackbar
+        open={Boolean(compressionNotice)}
+        autoHideDuration={4000}
+        onClose={() => setCompressionNotice("")}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        message={
+          <Stack direction="row" spacing={1} alignItems="center">
+            <AutoAwesomeRoundedIcon fontSize="small" />
+            <Typography variant="body2">{compressionNotice}</Typography>
+          </Stack>
+        }
+        ContentProps={{
+          sx: {
+            bgcolor: "primary.main",
+            color: "primary.contrastText",
+            borderRadius: 2,
+          },
         }}
       />
     </Box>
