@@ -2,9 +2,9 @@ import { pipeline, env } from "@huggingface/transformers";
 import { getModelById } from "./modelCatalog";
 
 const DEFAULT_GENERATION_CONFIG = {
-  temperature: 0.1,
+  temperature: 0.05,
   topP: 0.85,
-  maxTokens: 128,
+  maxTokens: 160,
   repetitionPenalty: 1.1,
 };
 

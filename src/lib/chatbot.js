@@ -12,6 +12,45 @@ export const BUSINESS_DOC_PATH = "docs/negocio.txt";
 export const FALLBACK_REPLY =
   "Por el momento no tengo esa información, pero con gusto puedo ayudarle con otra consulta sobre Cafe Central.";
 
+/**
+ * Fallback contextual: cuando el modelo no encuentra un dato, devolvemos un
+ * mensaje que (a) admite la limitación, (b) sugiere temas reales del
+ * negocio (horario, menú, ubicación, reservas, contacto) y (c) cierra con
+ * pregunta útil. Usa datos del JSON si están disponibles, si no cae a un
+ * genérico.
+ *
+ * Por qué no solo `FALLBACK_REPLY`: ese string es estático y no le dice
+ * al cliente qué puede preguntar. El nuevo fallback actúa como menú
+ * improvisado — mejor UX que un "lo siento" seco, y mata la alucinación
+ * de "no puedo proporcionar información sobre..." que tenía el modelo.
+ */
+export function buildFallbackReply(businessInfo) {
+  const data = tryParseBusinessData(businessInfo);
+  if (!data) return FALLBACK_REPLY;
+
+  const businessName = data.local?.nombre ?? "el local";
+  const hasHorarios = Boolean(data.horarios?.regular);
+  const hasMenu = Boolean(data.menu?.categorias);
+  const hasUbicacion = Array.isArray(data.sucursales) && data.sucursales.length > 0;
+  const hasReservas = Boolean(data.servicios?.reservas);
+  const telefono = data.local?.telefono;
+
+  const temas = [];
+  if (hasHorarios) temas.push("horarios");
+  if (hasMenu) temas.push("el menú");
+  if (hasUbicacion) temas.push("la ubicación");
+  if (hasReservas) temas.push("reservas");
+
+  if (temas.length === 0) return FALLBACK_REPLY;
+
+  const temasStr = temas.length === 1
+    ? temas[0]
+    : temas.slice(0, -1).join(", ") + " o " + temas[temas.length - 1];
+
+  const contacto = telefono ? ` Si necesitás algo urgente, llamános al ${telefono}.` : "";
+  return `No tengo ese dato cargado, pero te puedo ayudar con ${temasStr}.${contacto} ¿Qué te interesa?`;
+}
+
 export const SUGGESTED_QUESTIONS = [
   "¿Cuál es el horario?",
   "¿Dónde están ubicados?",
@@ -75,8 +114,14 @@ export function buildSystemPrompt(assistantName = DEFAULT_ASSISTANT_NAME) {
     `Si el dato no está: respondé "No tengo ese dato cargado, te recomiendo consultar en el local" y, si el bloque tiene un canal (teléfono, WhatsApp, Instagram), mencionalo.`,
     `Si necesitás chequear algo: primero un mensaje breve tipo "ya te averiguo" o "déjame confirmar", y LUEGO, en el mismo turno, seguí con la información concreta. No esperes a que el cliente vuelva a escribir.`,
     ``,
+    `# Cliente identificado`,
+    `Si en el mensaje del cliente viene marcado «Cliente (registrado como: NOMBRE)», ese es su nombre. Usalo para personalizar la respuesta cuando sea natural (ej: «De nada, NOMBRE», «¿Querés que te reserve, NOMBRE?»). NO repitas su nombre en cada respuesta, usalo solo si suma calidez. NO vuelvas a preguntarle el nombre. NO digas «Me llamo [X]» salvo que él te pregunte tu nombre.`,
+    ``,
     `# Formato`,
     `Sin prefijos ("Respuesta:", "Bot:"). Sin comillas envolviendo tu respuesta. Sin etiquetas meta. Una respuesta por turno, salvo el caso de "dos pasos" descrito arriba.`,
+    ``,
+    `# Precios`,
+    `Cuando menciones un precio, usá SIEMPRE el formato "$1.500" (signo pesos adelante, separador de miles con punto, sin espacios). Ejemplos: $1.500, $3.200, $7.800. Si el dato trae decimales, no los inventes — usá el número entero tal como aparece en «Información del negocio».`,
     ``,
     `# Fuera de scope`,
     `Si el cliente pregunta algo que NO es del negocio (matemática, código, política, etc.): redirigí amablemente, ej: "Eso no es lo mío, pero si te puedo ayudar con algo del local, decime."`,
@@ -165,9 +210,9 @@ export const DEFAULT_CONFIG = {
   fallbackModelIds: DEFAULT_FALLBACK_MODEL_IDS,
   assistantName: DEFAULT_ASSISTANT_NAME,
   systemPrompt: SYSTEM_PROMPT,
-  temperature: 0.1,
+  temperature: 0.05,
   topP: 0.85,
-  maxTokens: 128,
+  maxTokens: 160,
   repetitionPenalty: 1.1,
   contextWindowSize: 4096,
   businessInfo: "",
@@ -359,6 +404,7 @@ export function buildMessages({
   maxTokens = DEFAULT_CONFIG.maxTokens,
   now = new Date(),
   clientTimeZone,
+  customerName,
 }) {
   // Send only the sections of the business document relevant to this question,
   // within the available token budget (RAG-lite, see contextRetrieval.js).
@@ -421,8 +467,14 @@ export function buildMessages({
   }
 
   // 5. Pregunta del cliente al final — el modelo la lee con la "atención
-  //    fresca" y la usa para focalizar la respuesta.
-  parts.push(`Pregunta del cliente: ${question.trim()}`);
+  //    fresca" y la usa para focalizar la respuesta. Si tenemos el nombre
+  //    del cliente registrado, lo marcamos acá para que el system prompt
+  //    pueda personalizar la respuesta sin que el modelo tenga que adivinar.
+  const name = (customerName || "").trim();
+  const questionLine = name
+    ? `Pregunta del cliente (registrado como: ${name}): ${question.trim()}`
+    : `Pregunta del cliente: ${question.trim()}`;
+  parts.push(questionLine);
 
   const userContent = parts.join("\n\n");
   
@@ -433,6 +485,24 @@ export function buildMessages({
       content: userContent,
     },
   ];
+}
+
+/**
+ * Extrae el nombre del cliente de un mensaje. Devuelve `null` si no
+ * detecta una presentación clara. Usado para que la app recuerde el
+ * nombre en estado conversacional y lo inyecte en prompts siguientes.
+ *
+ * Acepta frases tipo "me llamo X", "soy X", "mi nombre es X", "llamame X".
+ * Devuelve solo el primer nombre (capitalizado) y descarta palabras
+ * adicionales para no romper la personalización con saludos largos.
+ */
+export function extractCustomerName(text = "") {
+  if (!text) return null;
+  const match = text.match(
+    /(?:me llamo|soy|mi nombre es|llamame|llamáme|me dicen)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{1,20})/i
+  );
+  if (!match) return null;
+  return match[1];
 }
 
 /**
@@ -463,8 +533,10 @@ export function sanitizeStreamingText(rawText) {
   return text.trimStart();
 }
 
-export function sanitizeAssistantReply(rawReply) {
-  const fallback = FALLBACK_REPLY;
+export function sanitizeAssistantReply(rawReply, businessInfo = "") {
+  // Fallback contextual si hay businessInfo (PR2.C), si no el estático
+  // para mantener compat con callers/tests viejos.
+  const fallback = businessInfo ? buildFallbackReply(businessInfo) : FALLBACK_REPLY;
 
   if (!rawReply || typeof rawReply !== "string") {
     return fallback;
@@ -524,7 +596,13 @@ export function sanitizeAssistantReply(rawReply) {
   if (
     /^(sí|si)\s*,?\s*si la respuesta no está en la información disponible/i.test(sanitized) ||
     /^no se dispone de esa información\.?$/i.test(sanitized) ||
-    /^no tengo esa información\.?$/i.test(sanitized)
+    /^no tengo esa información\.?$/i.test(sanitized) ||
+    // Patrones adicionales que produce TinyLlama cuando se traba (PR2.C):
+    // «Lo siento, pero no puedo proporcionar información sobre...»,
+    // «No puedo ayudar con eso...», «No tengo acceso a...».
+    /^lo siento,?\s+pero\s+no\s+(puedo|dispongo|cuento\s+con)/i.test(sanitized) ||
+    /^no\s+puedo\s+(proporcionar|brindar|dar|ayudar)/i.test(sanitized) ||
+    /^no\s+(tengo|cuento\s+con)\s+(acceso|informaci[oó]n)\s+(a|sobre)/i.test(sanitized)
   ) {
     return fallback;
   }
@@ -850,6 +928,230 @@ export function quickLookup(businessInfo, question, options = {}) {
   return null;
 }
 
+/**
+ * Intenciones de negocio que la app reconoce. Se usan para dos cosas:
+ *  1) Decidir si `quickLookup` puede responder sin modelo.
+ *  2) Decidir qué repregunta proactiva agregar al final de la respuesta
+ *     del modelo cuando el modelo no haya cerrado con una pregunta útil
+ *     (los modelos chicos, ej. TinyLlama 1.1B, suelen olvidarse).
+ *
+ * Una sola fuente de verdad: la lista y el orden de los regex debe
+ * matchear con la implementación real. Si agregás una intención nueva,
+ * agregá también una rama en `buildFollowUp` y un test.
+ */
+const INTENT_PATTERNS = [
+  // Orden importa: precio antes que menu (porque el regex de menu incluye
+  // palabras como "cafe" o "medialuna" que pueden matchear junto con
+  // "cuanto"). Si la pregunta tiene keywords de precio, gana precio.
+  ["precio", /precio|cuesta|vale|sale|cuanto|cu[aá]nto|valor|tarifa/],
+  ["menu", /menu|carta|plato|comida|comer|que tienen|que hay para|cafe|brunch|almuerzo|desayun|merienda|postre|torta|medialuna|tostado|sandwich|jugo|bebida|cerveza|vino|destacad|recomend.*(comida|plato|cafe|menu|para comer|para tomar)/],
+  ["promo", /promoci|descuento|oferta|promo/],
+  ["horario", /horario|abre|cierra|cuando|lunes|viernes|sabado|domingo|manana|tarde|hoy|ahora/],
+  ["ubicacion", /direcci|donde|ubicaci|calle|barrio|llegar|mapa|sucursal|zona/],
+  ["contacto", /telefon|numero|contacto|llamar|whatsapp|mail|email/],
+  ["pago", /pago|pagar|efectivo|tarjeta|credito|debito|mercadopago|transferencia|qr/],
+  ["reserva", /reserva|reservar|mesa|apartar/],
+  ["mascota", /mascota|perro|gato|pet/],
+  ["wifi", /wifi|internet|clave|contrasena|contraseña|password/],
+  ["delivery", /delivery|domicilio|envio/],
+  ["takeaway", /takeaway|para llevar|llevar/],
+  ["cancelacion", /cancelaci[oó]n|cancelar|cancel\w{1,3}/],
+  ["factura", /factura|facturacion|facturar/],
+  ["dieta", /vegetarian|vegano|sin gluten|celiac|leche vegetal|almendra|soja/],
+  ["cocina", /cocina|ultima orden|ultima hora|ultima pedido/],
+  ["recomendacion_dia", /convien|menos gente|tranquilo|sin gente|mejor dia|cuando ir/],
+  ["descripcion", /nombre|que es|que hacen|dedica|descripci|cafeteria|quienes son|historia/],
+];
+
+/**
+ * Detecta la intención dominante de una pregunta. Devuelve `null` si no
+ * matchea ninguna (en ese caso el modelo responde libre).
+ *
+ * `precio` se chequea antes que `menu` para que "cuanto sale el cafe" no se
+ * confunda con "qué tienen en el menú". `reserva` antes que `mascota` por
+ * la palabra "mesa" que aparece en reservas.
+ */
+export function detectIntent(question = "") {
+  const q = (question || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  for (const [intent, pattern] of INTENT_PATTERNS) {
+    if (pattern.test(q)) return intent;
+  }
+  return null;
+}
+
+function tryParseBusinessData(businessInfo) {
+  if (!businessInfo) return null;
+  try {
+    return JSON.parse(businessInfo);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parsea un string "HH:MM - HH:MM" (formato de negocio.txt) y devuelve
+ * la hora de cierre como [HH, MM] en 24h, o null si no matchea.
+ * Se usa para construir la repregunta "¿venís? estamos hasta las HH:MM".
+ */
+function parseClosingHour(hoursRange) {
+  if (typeof hoursRange !== "string") return null;
+  const match = hoursRange.match(/(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+  return [parseInt(match[3], 10), parseInt(match[4], 10)];
+}
+
+const DIAS_CORTO = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
+
+/**
+ * Devuelve la hora de cierre de HOY según el JSON del negocio, o null si
+ * no se puede determinar (no hay horarios cargados o es un día especial
+ * con horario custom). Usado para personalizar la repregunta de horario.
+ */
+function getTodayClosingTime(data, now) {
+  const regular = data?.horarios?.regular;
+  if (!regular) return null;
+  const dayName = DIAS_CORTO[now.getDay()];
+  const todayRange = regular[dayName];
+  return parseClosingHour(todayRange);
+}
+
+function formatHour(h, m) {
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+/**
+ * Construye una repregunta proactiva para una intención dada. Devuelve
+ * `null` si no hay una buena repregunta para esa intención.
+ *
+ * Reglas:
+ *  - 1 frase, máx ~120 chars, termina con "?" o "?"
+ *  - Usa datos reales del JSON cuando aplica (ej: horario de cierre de hoy)
+ *  - Personaliza con el nombre del cliente si está disponible
+ *  - Sugiere siguiente paso útil: venir, reservar, mirar el menú, etc.
+ *
+ * @param {string} intent       - Intención detectada (ver INTENT_PATTERNS).
+ * @param {string} businessInfo - JSON del negocio (puede ser texto plano).
+ * @param {object} [options]
+ * @param {string} [options.customerName]  - Nombre del cliente si ya se presentó.
+ * @param {Date}   [options.now]           - Reloj para "hoy".
+ * @returns {string|null}
+ */
+export function buildFollowUp(intent, businessInfo, options = {}) {
+  const { customerName, now = new Date() } = options;
+  const data = tryParseBusinessData(businessInfo);
+  const name = (customerName || "").trim();
+  const greet = name ? `, ${name}` : "";
+
+  switch (intent) {
+    case "horario": {
+      const closing = data ? getTodayClosingTime(data, now) : null;
+      const closingStr = closing ? ` hasta las ${formatHour(closing[0], closing[1])}` : "";
+      return `¿Te interesa venir${greet}? Hoy estamos abiertos${closingStr}.${name ? "" : " Si me decís tu nombre, te lo confirmo con más detalle."}`;
+    }
+    case "precio":
+    case "menu": {
+      const sym = data?.metadata?.simbolo_moneda ?? "$";
+      return `¿Querés que te pase el menú completo o tenés algo en mente?${name ? ` Decime, ${name}.` : ""}`;
+    }
+    case "promo": {
+      const ig = data?.local?.redes_sociales?.instagram;
+      return ig
+        ? `¿Querés que te cuente las promos vigentes? Las actualizamos en Instagram (${ig}).`
+        : `¿Querés que te cuente las promos vigentes?`;
+    }
+    case "ubicacion": {
+      const first = data?.sucursales?.[0];
+      if (first?.barrio) {
+        return `¿Querés que te pase cómo llegar a la sucursal de ${first.barrio}?`;
+      }
+      return `¿Querés que te pase la dirección o cómo llegar?`;
+    }
+    case "contacto":
+      return `¿Te sirve el teléfono o preferís que te derive por WhatsApp?`;
+    case "pago":
+      return `¿Vas a pagar en efectivo o con tarjeta? Así te confirmo los medios disponibles.`;
+    case "reserva": {
+      const canal = data?.servicios?.reservas_canal;
+      return canal
+        ? `¿Querés que te reserve? Lo podemos hacer por ${canal}.`
+        : `¿Querés que te reserve?`;
+    }
+    case "mascota":
+      return `¿Venís con mascota${greet}? Las mesas de exterior son pet friendly.`;
+    case "wifi":
+      return `¿Necesitás la clave del WiFi${greet}?`;
+    case "delivery":
+      return `¿Querés hacer un pedido o consultás la cobertura${greet}?`;
+    case "takeaway":
+      return `¿Pasás a retirar${greet}?`;
+    case "cancelacion":
+      return `¿Necesitás cancelar una reserva${greet}?`;
+    case "factura":
+      return `¿Necesitás factura A o B${greet}?`;
+    case "dieta":
+      return `¿Buscás algo específico${greet}?`;
+    case "cocina":
+      return `¿Querés saber qué hay disponible a esta hora${greet}?`;
+    case "recomendacion_dia":
+      return `¿Querés que te recomiende un día tranquilo${greet}?`;
+    case "descripcion":
+      return `¿Querés saber más del local${greet}?`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Heurística: ¿la respuesta del modelo YA cierra con una pregunta útil?
+ * Si la respuesta es corta, sin signos de interrogación, o tiene un
+ * "?" cerca del final, asumimos que ya repreguntó. Si no, devolvemos
+ * `false` y `enhanceReplyWithFollowUp` agrega la plantilla.
+ *
+ * Modelos chicos (TinyLlama 1.1B) suelen olvidarse de cerrar con pregunta
+ * aunque el system prompt se los pida; por eso este check es laxo (mejor
+ * agregar una repregunta de más que quedarse corto).
+ */
+function replyAlreadyEndsWithQuestion(reply) {
+  if (!reply) return false;
+  const trimmed = reply.trim();
+  if (!trimmed) return false;
+  // Busca un "?" en los últimos 80 chars (cubre preguntas multilinea y
+  // respuestas largas que terminan preguntando).
+  const tail = trimmed.slice(-80);
+  return /\?/.test(tail);
+}
+
+/**
+ * Enriquece la respuesta del modelo con una repregunta proactiva, solo
+ * si (a) la pregunta del cliente matchea una intención conocida, (b) la
+ * respuesta del modelo no termina ya con una pregunta, y (c) hay una
+ * plantilla disponible para esa intención.
+ *
+ * Si la respuesta del modelo ya es una pregunta, no la tocamos. Si la
+ * intención no matchea, devolvemos la respuesta sin cambios.
+ *
+ * @param {string} reply        - Respuesta sanitizada del modelo.
+ * @param {string} question     - Pregunta original del cliente.
+ * @param {string} businessInfo - JSON del negocio.
+ * @param {object} [options]
+ * @param {string} [options.customerName]
+ * @param {Date}   [options.now]
+ * @returns {string} Reply con repregunta concatenada (o sin cambios).
+ */
+export function enhanceReplyWithFollowUp(reply, question, businessInfo, options = {}) {
+  if (!reply) return reply;
+  const intent = detectIntent(question);
+  if (!intent) return reply;
+  if (replyAlreadyEndsWithQuestion(reply)) return reply;
+  const followUp = buildFollowUp(intent, businessInfo, options);
+  if (!followUp) return reply;
+  // Une con espacio. Si la respuesta original no termina en puntuación
+  // fuerte, agregamos un "." antes de la repregunta para que se lea bien.
+  const trimmed = reply.replace(/[\s]+$/, "");
+  const needsPeriod = !/[.!?]$/.test(trimmed);
+  return `${trimmed}${needsPeriod ? "." : ""} ${followUp}`;
+}
+
 export async function streamAssistantReply(engine, businessInfo, question, onToken, config = {}) {
   const {
     systemPrompt = SYSTEM_PROMPT,
@@ -881,7 +1183,7 @@ export async function streamAssistantReply(engine, businessInfo, question, onTok
       onToken(accumulated);
     }
   }
-  return sanitizeAssistantReply(accumulated);
+  return sanitizeAssistantReply(accumulated, businessInfo);
 }
 
 // Non-streaming variant kept for unit tests
@@ -907,7 +1209,7 @@ export async function getAssistantReply(engine, businessInfo, question, config =
     max_tokens: maxTokens,
     stop: ["\nInformación del negocio:", "\nPregunta:", "\nCliente:"],
   });
-  return sanitizeAssistantReply(response.choices?.[0]?.message?.content);
+  return sanitizeAssistantReply(response.choices?.[0]?.message?.content, businessInfo);
 }
 
 /**
@@ -1237,7 +1539,7 @@ export async function summarizeChatWithModel(engine, messages, config = {}) {
   if (transcript.length < 30) return "";
 
   const {
-    temperature = 0.1,
+    temperature = 0.05,
     topP = 0.85,
     repetitionPenalty = 1.1,
   } = config;
@@ -1325,7 +1627,7 @@ export function buildContextPreview({
  */
 export async function summarizeBusinessInfo(engine, rawText, config = {}) {
   const {
-    temperature = 0.1,
+    temperature = 0.05,
     topP = 0.85,
     repetitionPenalty = 1.1,
   } = config;

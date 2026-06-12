@@ -4,7 +4,12 @@ import {
   FALLBACK_REPLY,
   fetchDynamicContexts,
   detectCustomerLanguage,
+  detectIntent,
+  buildFallbackReply,
+  buildFollowUp,
+  enhanceReplyWithFollowUp,
   estimateContextOverflow,
+  extractCustomerName,
   generateChatSummary,
   getCurrentContextInfo,
   MODEL_ID,
@@ -66,11 +71,14 @@ describe("chatbot helpers", () => {
     expect(prompt).toContain(DEFAULT_ASSISTANT_NAME);
   });
 
-  it("buildSystemPrompt tiene una longitud razonable (entre 600 y 1600 chars)", () => {
+  it("buildSystemPrompt tiene una longitud razonable (entre 600 y 2200 chars)", () => {
     const prompt = buildSystemPrompt();
-    // Arquitectura para modelos chicos: ni novela ni telegrama.
+    // Arquitectura para modelos chicos: ni novela ni telegrama. El rango
+    // se ajustó a 2200 para absorber las nuevas secciones «Cliente
+    // identificado» (PR1.B) y «Precios» (PR2) sin tener que recortar las
+    // reglas duras.
     expect(prompt.length).toBeGreaterThan(600);
-    expect(prompt.length).toBeLessThan(1600);
+    expect(prompt.length).toBeLessThan(2200);
   });
 
   it("buildSystemPrompt cubre las 4 dimensiones críticas: identidad, tono, datos, fuera de scope", () => {
@@ -236,8 +244,8 @@ describe("chatbot helpers", () => {
     expect(engine.chat.completions.create).toHaveBeenCalledWith(
       expect.objectContaining({
         messages: expect.any(Array),
-        temperature: 0.1,
-        max_tokens: 128,
+        temperature: 0.05,
+        max_tokens: 160,
         repetition_penalty: 1.1,
         top_p: 0.85,
         stop: expect.any(Array)
@@ -922,6 +930,336 @@ describe("chatbot helpers", () => {
     it("incluye el canal de reservas en la respuesta de reservas", () => {
       const reply = quickLookup(fullDoc, "¿Aceptan reservas?");
       expect(reply).toContain("sitio web");
+    });
+  });
+
+  describe("detectIntent", () => {
+    it("reconoce intención horario", () => {
+      expect(detectIntent("¿A qué hora abren?")).toBe("horario");
+      expect(detectIntent("¿Están abiertos hoy?")).toBe("horario");
+    });
+
+    it("reconoce intención precio (antes que menu)", () => {
+      // Crítico: "cuanto sale el cafe" debe ser precio, no menu.
+      expect(detectIntent("¿Cuánto sale un café?")).toBe("precio");
+      expect(detectIntent("¿Cuánto vale la medialuna?")).toBe("precio");
+    });
+
+    it("reconoce intención menu", () => {
+      expect(detectIntent("¿Qué tienen en el menú?")).toBe("menu");
+      expect(detectIntent("¿Tienen brunch?")).toBe("menu");
+    });
+
+    it("reconoce intención ubicacion, contacto, pago, reserva, wifi, delivery", () => {
+      expect(detectIntent("¿Dónde están?")).toBe("ubicacion");
+      expect(detectIntent("¿Cuál es el teléfono?")).toBe("contacto");
+      expect(detectIntent("¿Aceptan tarjeta?")).toBe("pago");
+      expect(detectIntent("¿Aceptan reservas?")).toBe("reserva");
+      expect(detectIntent("¿Tienen WiFi?")).toBe("wifi");
+      expect(detectIntent("¿Hacen delivery?")).toBe("delivery");
+    });
+
+    it("devuelve null cuando no matchea ninguna intención", () => {
+      expect(detectIntent("hola")).toBeNull();
+      expect(detectIntent("")).toBeNull();
+      expect(detectIntent("¿De qué color es el cielo?")).toBeNull();
+    });
+  });
+
+  describe("buildFollowUp", () => {
+    const fullDoc = JSON.stringify({
+      local: {
+        nombre: "Café Central",
+        redes_sociales: { instagram: "@cafecentral" },
+      },
+      horarios: {
+        regular: {
+          lunes: "08:00 - 20:00",
+          martes: "08:00 - 20:00",
+          miercoles: "08:00 - 20:00",
+          jueves: "08:00 - 22:00",
+          viernes: "08:00 - 23:00",
+          sabado: "09:00 - 23:00",
+          domingo: "09:00 - 20:00",
+        },
+      },
+      sucursales: [{ nombre: "Centro", barrio: "San Nicolás" }],
+      servicios: { reservas_canal: "WhatsApp o teléfono" },
+      metadata: { simbolo_moneda: "$" },
+    });
+
+    it("horario: menciona el cierre de hoy", () => {
+      // Viernes 12 de junio de 2026 → cierra 23:00
+      const friday = new Date("2026-06-12T18:00:00Z"); // 15:00 BA
+      const followUp = buildFollowUp("horario", fullDoc, { now: friday });
+      expect(followUp).toContain("?");
+      expect(followUp).toMatch(/23:00/);
+    });
+
+    it("horario: cae a una versión genérica si el JSON no tiene horarios", () => {
+      const followUp = buildFollowUp("horario", "{}", { now: new Date("2026-06-12T18:00:00Z") });
+      expect(followUp).toContain("?");
+      // No debe inventar horario: no contiene "23:00" si no hay datos.
+      expect(followUp).not.toMatch(/\d{2}:\d{2}/);
+    });
+
+    it("horario: personaliza con el nombre del cliente", () => {
+      const friday = new Date("2026-06-12T18:00:00Z");
+      const followUp = buildFollowUp("horario", fullDoc, { now: friday, customerName: "Diego" });
+      expect(followUp).toContain("Diego");
+    });
+
+    it("precio/menu: sugiere pasar el menú o consultar algo específico", () => {
+      expect(buildFollowUp("precio", fullDoc)).toContain("menú");
+      expect(buildFollowUp("menu", fullDoc)).toContain("menú");
+    });
+
+    it("promo: menciona Instagram si está configurado", () => {
+      const followUp = buildFollowUp("promo", fullDoc);
+      expect(followUp).toContain("@cafecentral");
+    });
+
+    it("ubicacion: usa el barrio de la primera sucursal", () => {
+      const followUp = buildFollowUp("ubicacion", fullDoc);
+      expect(followUp).toContain("San Nicolás");
+    });
+
+    it("reserva: usa el canal configurado", () => {
+      const followUp = buildFollowUp("reserva", fullDoc);
+      expect(followUp).toContain("WhatsApp");
+    });
+
+    it("devuelve null para una intención sin plantilla", () => {
+      // Intención desconocida
+      expect(buildFollowUp("foo_bar", fullDoc)).toBeNull();
+    });
+
+    it("maneja businessInfo que no es JSON sin romper", () => {
+      const followUp = buildFollowUp("horario", "texto plano sin JSON", { now: new Date("2026-06-12T18:00:00Z") });
+      expect(followUp).toContain("?");
+    });
+  });
+
+  describe("enhanceReplyWithFollowUp", () => {
+    const fullDoc = JSON.stringify({
+      horarios: { regular: { lunes: "08:00 - 20:00" } },
+      metadata: { simbolo_moneda: "$" },
+    });
+
+    it("concatena una repregunta cuando la respuesta no termina en pregunta", () => {
+      const out = enhanceReplyWithFollowUp(
+        "Abrimos de 8 a 20.",
+        "¿Cuál es el horario?",
+        fullDoc
+      );
+      expect(out).toContain("Abrimos de 8 a 20.");
+      expect(out).toContain("?");
+      expect(out.length).toBeGreaterThan("Abrimos de 8 a 20.".length);
+    });
+
+    it("NO agrega repregunta si la respuesta del modelo ya termina con '?'", () => {
+      const out = enhanceReplyWithFollowUp(
+        "¿Abrimos de 8 a 20. ¿Querés que te reserve?",
+        "¿Cuál es el horario?",
+        fullDoc
+      );
+      expect(out).toBe("¿Abrimos de 8 a 20. ¿Querés que te reserve?");
+    });
+
+    it("NO agrega repregunta si la intención no es reconocida", () => {
+      const original = "Hola, ¿en qué te puedo ayudar?";
+      const out = enhanceReplyWithFollowUp(original, "hola", fullDoc);
+      expect(out).toBe(original);
+    });
+
+    it("agrega un punto antes de la repregunta si la respuesta no termina en puntuación", () => {
+      const out = enhanceReplyWithFollowUp(
+        "Abrimos de 8 a 20",  // sin punto final
+        "¿Cuál es el horario?",
+        fullDoc
+      );
+      // La concatenación debe leer bien: hay un '.' entre la respuesta y la
+      // repregunta.
+      expect(out).toMatch(/20\. /);
+    });
+
+    it("devuelve la respuesta sin cambios si es vacía", () => {
+      expect(enhanceReplyWithFollowUp("", "¿Cuál es el horario?", fullDoc)).toBe("");
+    });
+
+    it("personaliza con el nombre del cliente cuando se pasa", () => {
+      const out = enhanceReplyWithFollowUp(
+        "Abrimos de 8 a 20.",
+        "¿Cuál es el horario?",
+        fullDoc,
+        { customerName: "Diego" }
+      );
+      expect(out).toContain("Diego");
+    });
+  });
+
+  describe("extractCustomerName", () => {
+    it("detecta 'me llamo X'", () => {
+      expect(extractCustomerName("me llamo Diego")).toBe("Diego");
+      expect(extractCustomerName("Hola, me llamo Diego, ¿cuál es el horario?")).toBe("Diego");
+    });
+
+    it("detecta 'soy X'", () => {
+      expect(extractCustomerName("Soy Martín")).toBe("Martín");
+    });
+
+    it("detecta 'mi nombre es X'", () => {
+      expect(extractCustomerName("Mi nombre es Ana")).toBe("Ana");
+    });
+
+    it("detecta 'llamame X'", () => {
+      expect(extractCustomerName("llamame Pedro")).toBe("Pedro");
+    });
+
+    it("devuelve null si no hay presentación", () => {
+      expect(extractCustomerName("¿Cuál es el horario?")).toBeNull();
+      expect(extractCustomerName("")).toBeNull();
+      expect(extractCustomerName("quiero un café")).toBeNull();
+    });
+
+    it("devuelve el primer nombre y descarta lo que sigue", () => {
+      // Importante: nombres con mayúscula inicial, una sola palabra.
+      expect(extractCustomerName("me llamo Diego Martín")).toBe("Diego");
+    });
+  });
+
+  describe("buildMessages — customerName", () => {
+    it("inyecta el nombre del cliente en la pregunta si está disponible", () => {
+      const messages = buildMessages({
+        businessInfo: "{}",
+        question: "¿Cuál es el horario?",
+        customerName: "Diego",
+        now: new Date("2026-06-11T14:30:00Z"),
+        clientTimeZone: "UTC",
+      });
+
+      expect(messages[1].content).toContain("(registrado como: Diego)");
+      expect(messages[1].content).toContain("Pregunta del cliente");
+    });
+
+    it("NO inyecta el nombre si no está disponible", () => {
+      const messages = buildMessages({
+        businessInfo: "{}",
+        question: "¿Cuál es el horario?",
+        now: new Date("2026-06-11T14:30:00Z"),
+        clientTimeZone: "UTC",
+      });
+
+      expect(messages[1].content).not.toContain("registrado como");
+    });
+  });
+
+  describe("buildSystemPrompt — bloque de cliente identificado", () => {
+    it("incluye la regla dura sobre el nombre del cliente", () => {
+      const prompt = buildSystemPrompt("Martín");
+      expect(prompt).toMatch(/# Cliente identificado/);
+      expect(prompt).toContain("registrado como");
+      expect(prompt).toContain("NO vuelvas a preguntarle el nombre");
+    });
+  });
+
+  describe("buildSystemPrompt — bloque de precios (PR2)", () => {
+    it("incluye la regla de formato de precios", () => {
+      const prompt = buildSystemPrompt();
+      expect(prompt).toMatch(/# Precios/);
+      // El formato exacto que el modelo debe respetar.
+      expect(prompt).toContain("$1.500");
+      expect(prompt).toContain("separador de miles con punto");
+    });
+  });
+
+  describe("buildFallbackReply (PR2.C)", () => {
+    it("devuelve el FALLBACK_REPLY genérico si no hay businessInfo", () => {
+      expect(buildFallbackReply("")).toBe(FALLBACK_REPLY);
+      expect(buildFallbackReply(null)).toBe(FALLBACK_REPLY);
+    });
+
+    it("construye un fallback contextual con temas del JSON", () => {
+      const info = JSON.stringify({
+        local: {
+          nombre: "Café Central",
+          telefono: "+54 11 4567 8899",
+        },
+        horarios: { regular: { lunes: "08:00 - 20:00" } },
+        menu: { categorias: { cafes: [] } },
+        sucursales: [{ nombre: "Centro" }],
+        servicios: { reservas: true },
+      });
+      const reply = buildFallbackReply(info);
+      expect(reply).toContain("No tengo ese dato cargado");
+      // Temas disponibles en el JSON
+      expect(reply).toContain("horarios");
+      expect(reply).toContain("menú");
+      expect(reply).toContain("ubicación");
+      expect(reply).toContain("reservas");
+      // Teléfono
+      expect(reply).toContain("+54 11 4567 8899");
+      // Cierra con pregunta
+      expect(reply).toMatch(/\?$/);
+    });
+
+    it("omite temas que no están en el JSON", () => {
+      const info = JSON.stringify({
+        local: { nombre: "X" },
+        horarios: { regular: { lunes: "08:00 - 20:00" } },
+        // sin menu, sin sucursales, sin reservas
+      });
+      const reply = buildFallbackReply(info);
+      expect(reply).toContain("horarios");
+      expect(reply).not.toContain("menú");
+      expect(reply).not.toContain("ubicación");
+      expect(reply).not.toContain("reservas");
+    });
+
+    it("cae al FALLBACK_REPLY si businessInfo no es JSON", () => {
+      expect(buildFallbackReply("texto plano")).toBe(FALLBACK_REPLY);
+    });
+  });
+
+  describe("sanitizeAssistantReply — fallback contextual (PR2.C)", () => {
+    it("reemplaza 'Lo siento, pero no puedo...' con el fallback contextual cuando hay businessInfo", () => {
+      const info = JSON.stringify({
+        local: { telefono: "+54 11 4567 8899" },
+        horarios: { regular: { lunes: "08:00 - 20:00" } },
+        menu: { categorias: { cafes: [] } },
+        servicios: {},
+      });
+      const raw = "Lo siento, pero no puedo proporcionar información sobre precios ni menú de la cafetería Central. Los datos disponibles solo mencionan las bebidas y alimentos vegetarianos claramente señalados en el menú. Si necesitas más detalles sobre los platos o precios, te recomiendo que hables con un empleado del local.";
+      const out = sanitizeAssistantReply(raw, info);
+      // El fallback contextual debe mencionar horarios y menú
+      expect(out).toContain("horarios");
+      expect(out).toContain("menú");
+      // Y NO debe contener el "Lo siento" original
+      expect(out).not.toContain("Lo siento");
+    });
+
+    it("reemplaza 'No puedo ayudar con...' con el fallback contextual", () => {
+      const info = JSON.stringify({ local: {}, horarios: { regular: { lunes: "08:00 - 20:00" } } });
+      const out = sanitizeAssistantReply(
+        "No puedo ayudar con eso, mi conocimiento está limitado a la información del local.",
+        info
+      );
+      expect(out).toContain("horarios");
+    });
+
+    it("reemplaza 'No tengo acceso a...' con el fallback contextual", () => {
+      const info = JSON.stringify({ local: {}, horarios: { regular: { lunes: "08:00 - 20:00" } } });
+      const out = sanitizeAssistantReply(
+        "No tengo acceso a información sobre eso.",
+        info
+      );
+      expect(out).toContain("horarios");
+    });
+
+    it("mantiene el FALLBACK_REPLY viejo si NO se pasa businessInfo (back-compat)", () => {
+      // Tests viejos que no pasan businessInfo deben seguir viendo FALLBACK_REPLY.
+      expect(sanitizeAssistantReply("Lo siento, pero no puedo proporcionar información sobre X.")).toBe(FALLBACK_REPLY);
+      expect(sanitizeAssistantReply("No tengo esa información.")).toBe(FALLBACK_REPLY);
     });
   });
 });

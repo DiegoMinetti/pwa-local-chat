@@ -33,6 +33,8 @@ import {
   calculateMessagesTokens,
   computeHistoryBudget,
   createEngine,
+  enhanceReplyWithFollowUp,
+  extractCustomerName,
   fetchDynamicContexts,
   loadModelRuntimeModule,
   loadBusinessDocument,
@@ -172,6 +174,15 @@ export default function App() {
     intakeRef.current = { questionAsked: null, name: null, topic: null, realQuestion: null };
     setIntake({ questionAsked: null, name: null, topic: null, realQuestion: null });
   }, []);
+
+  // Nombre del cliente detectado durante la conversación. Se setea en
+  // submitQuestion (regex «me llamo X») y se inyecta en cada turno para
+  // que el modelo personalice la respuesta sin volver a preguntar.
+  // Es independiente del `intake.name` (que solo se llena en el flujo de
+  // intake mientras el modelo carga) — este es el nombre «real» que
+  // persiste durante toda la sesión.
+  const customerNameRef = useRef(null);
+  const [customerName, setCustomerName] = useState(null);
 
   // Ref for the composer wrapper (used when fixing the composer over mobile keyboard)
   const composerWrapperRef = useRef(null);
@@ -439,6 +450,12 @@ export default function App() {
       updateMsg(botMsgId, { text: "", pending: false, streaming: true });
 
       try {
+        // Capturamos el reloj una vez por turno. Lo usamos para la repregunta
+        // proactiva (ej: "estamos hasta las 20:00" si la pregunta es de
+        // horario y el JSON trae horarios.regular). Que sea el mismo `now`
+        // que verá la sección "Información actual" del prompt — así el
+        // modelo y la repregunta coinciden.
+        const now = new Date();
         // Pre-fetch dynamic contexts so the first streamed token arrives sooner.
         const dynamicResult = await fetchDynamicContexts(configRef.current.dynamicSources || []);
         const allDynamicContexts = dynamicResult.contexts;
@@ -471,6 +488,7 @@ export default function App() {
           systemPrompt,
           chatHistory: memoryContext,
           additionalContexts: [...staticContexts, ...allDynamicContexts],
+          customerName: customerNameRef.current,
         };
 
         // Streaming real: actualizamos el bot message con el texto sanitizado
@@ -502,7 +520,13 @@ export default function App() {
           else clearTimeout(pendingFlush);
         }
         // Show complete sanitized text and stop streaming flag (drops the caret).
-        updateMsg(botMsgId, { text: finalText, streaming: false });
+        const finalWithFollowUp = enhanceReplyWithFollowUp(
+          finalText,
+          q,
+          configRef.current.businessInfo,
+          { customerName: customerNameRef.current, now }
+        );
+        updateMsg(botMsgId, { text: finalWithFollowUp, streaming: false });
 
         // Pipeline de memoria en background: no traba la próxima pregunta.
         recordInteraction(q, finalText);
@@ -763,6 +787,16 @@ export default function App() {
 
     // ── Caso 1: modelo listo ──
     if (engineRef.current) {
+      // Si el cliente se presenta en su mensaje (ej: "me llamo Diego..."),
+      // lo registramos como nombre para personalizar las próximas respuestas.
+      // Solo si todavía no teníamos uno — no pisamos un nombre ya conocido.
+      if (!customerNameRef.current) {
+        const detected = extractCustomerName(cleanQuestion);
+        if (detected) {
+          customerNameRef.current = detected;
+          setCustomerName(detected);
+        }
+      }
       const botMsgId = newId();
       setMessages((current) => [
         ...current,
