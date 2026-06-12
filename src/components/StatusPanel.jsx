@@ -12,11 +12,19 @@ export default function StatusPanel({ downloading, downloadPct, modelLabel, mode
     : `Preparando la descarga de ${modelName}…`;
 
   return (
-    <Stack spacing={0.5} sx={{ minWidth: 200 }}>
+    <Stack spacing={0.5} sx={{ minWidth: { xs: 0, sm: 220 }, maxWidth: 280 }}>
       <Stack direction="row" spacing={1} alignItems="center">
-        <Chip size="small" color="warning" label={label} />
+        <Chip
+          size="small"
+          label={label}
+          sx={{
+            bgcolor: "warning.lighter",
+            color: "warning.main",
+            border: (theme) => `1px solid ${theme.vars?.palette?.warning?.light ?? theme.palette.warning.light}`,
+          }}
+        />
         {downloadPct !== null && !isCached && (
-          <Typography variant="caption" color="text.secondary">
+          <Typography variant="caption" color="text.secondary" fontWeight={500}>
             {downloadPct}%
           </Typography>
         )}
@@ -24,9 +32,9 @@ export default function StatusPanel({ downloading, downloadPct, modelLabel, mode
       <LinearProgress
         variant={downloadPct !== null ? "determinate" : "indeterminate"}
         value={downloadPct ?? 0}
-        sx={{ borderRadius: 1, height: 5 }}
+        sx={{ height: 6 }}
       />
-      <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.68rem" }}>
+      <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.7rem", lineHeight: 1.35 }}>
         {subtext}
       </Typography>
     </Stack>

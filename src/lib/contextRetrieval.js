@@ -26,7 +26,7 @@ const SECTION_RULES = [
   {
     section: "horarios",
     pattern:
-      /horari|abre|cierra|abierto|cerrad|feriado|navidad|fin de semana|lunes|martes|miercoles|jueves|viernes|sabado|domingo|que hora|hasta cuando|desde cuando/,
+      /horari|abre|cierra|abierto|cerrad|feriado|navidad|fin de semana|ano nuevo|lunes|martes|miercoles|jueves|viernes|sabado|domingo|que hora|hasta cuando|desde cuando|cocina/,
   },
   {
     section: "sucursales",
@@ -36,12 +36,12 @@ const SECTION_RULES = [
   {
     section: "menu",
     pattern:
-      /menu|carta|plato|comida|comer|precio|cuesta|vale|sale|cuanto|cafe|brunch|almuerzo|desayun|merienda|postre|torta|medialuna|tostado|sandwich|jugo|bebida|cerveza|vino|promo|oferta|descuento/,
+      /menu|carta|plato|comida|comer|precio|cuesta|vale|sale|cuanto|cafe|brunch|almuerzo|desayun|merienda|postre|torta|medialuna|tostado|sandwich|jugo|bebida|cerveza|vino|promo|oferta|descuento|destacad|recomend|signature/,
   },
   {
     section: "servicios",
     pattern:
-      /pago|pagar|efectivo|tarjeta|credito|debito|mercado ?pago|transferencia|qr|delivery|envio|domicilio|takeaway|llevar|reserva|wifi|internet|servicio|promo|oferta|descuento/,
+      /pago|pagar|efectivo|tarjeta|credito|debito|mercado ?pago|transferencia|qr|delivery|envio|domicilio|takeaway|llevar|reserva|wifi|internet|servicio|promo|oferta|descuento|factura|facturac/,
   },
   {
     section: "dietas_y_opciones",
@@ -52,9 +52,13 @@ const SECTION_RULES = [
     pattern: /espera|demora|tarda|cuanto tiempo|rapido|al toque/,
   },
   {
+    section: "recomendaciones_por_dia",
+    pattern: /convien|mejor dia|cuando ir|menos gente|tranquilo|sin gente/,
+  },
+  {
     section: "local",
     pattern:
-      /telefono|numero|contacto|mail|email|instagram|facebook|redes|web|sitio|nombre|quienes|que es|que hacen|descripcion|fundac|historia/,
+      /telefono|numero|contacto|mail|email|instagram|facebook|redes|web|sitio|nombre|quienes|que es|que hacen|descripcion|fundac|historia|politica|cancelacion|cancelar|facturar|factura/,
   },
 ];
 

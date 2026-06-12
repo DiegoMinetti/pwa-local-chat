@@ -33,6 +33,7 @@ import {
   loadModelRuntimeModule,
   loadBusinessDocument,
   quickLookup,
+  sanitizeStreamingText,
   streamAssistantReply,
   SUGGESTED_QUESTIONS,
   summarizeBusinessInfo,
@@ -308,7 +309,7 @@ export default function App() {
       updateMsg(botMsgId, { text: "", pending: false, streaming: true });
 
       try {
-        // Accumulate text without showing intermediate updates
+        // Pre-fetch dynamic contexts so the first streamed token arrives sooner.
         const dynamicResult = await fetchDynamicContexts(configRef.current.dynamicSources || []);
         const allDynamicContexts = dynamicResult.contexts;
         const staticContexts = configRef.current.additionalContexts || [];
@@ -323,17 +324,38 @@ export default function App() {
           chatHistory: chatHistoryRef.current,
           additionalContexts: [...staticContexts, ...allDynamicContexts],
         };
-        
+
+        // Streaming real: actualizamos el bot message con el texto sanitizado
+        // acumulado a cada token. Esto activa el caret blink y la animación
+        // de reveal progresivo en MessageList. Se aplica throttling con rAF
+        // para no inundar React con renders a 30+ tokens/segundo.
+        let lastFlushedText = "";
+        let pendingFlush = null;
+        const hasRaf = typeof requestAnimationFrame === "function";
+        const flush = () => {
+          pendingFlush = null;
+          updateMsg(botMsgId, { text: lastFlushedText });
+        };
+        const scheduleFlush = (accumulated) => {
+          lastFlushedText = sanitizeStreamingText(accumulated);
+          if (pendingFlush !== null) return;
+          pendingFlush = hasRaf ? requestAnimationFrame(flush) : setTimeout(flush, 0);
+        };
+
         const finalText = await streamAssistantReply(
           engineRef.current,
           configRef.current.businessInfo,
           q,
-          () => {}, // no-op callback — don't update during streaming
+          scheduleFlush,
           config
         );
-        // Show complete text at once
+        if (pendingFlush !== null) {
+          if (hasRaf) cancelAnimationFrame(pendingFlush);
+          else clearTimeout(pendingFlush);
+        }
+        // Show complete sanitized text and stop streaming flag (drops the caret).
         updateMsg(botMsgId, { text: finalText, streaming: false });
-        
+
         // Update chat history after bot responds
         setMessages((current) => {
           const newHistory = generateChatSummary(current, computeHistoryBudget(configRef.current));
@@ -648,8 +670,15 @@ export default function App() {
         height: "100dvh",
         display: "flex",
         flexDirection: "column",
-        background:
-          "radial-gradient(circle at top, rgba(104, 161, 255, 0.16), transparent 30%), linear-gradient(180deg, #eef4ff 0%, #f8fafc 100%)",
+        // Fondo M3 cálido: gradiente radial sutil sobre surfaceContainer.low
+        // para que el panel central levante visualmente sin glassmorphism.
+        // Usamos los tokens de palette con fallback a vars para que funcione
+        // tanto con cssVariables: true como en tests sin ThemeProvider.
+        background: (theme) => {
+          const surface = theme.vars?.palette?.surfaceContainer?.low ?? theme.palette.surfaceContainer?.low;
+          const bg = theme.vars?.palette?.background?.default ?? theme.palette.background.default;
+          return `radial-gradient(circle at 50% 0%, ${surface} 0%, ${bg} 55%)`;
+        },
       }}
     >
       <Container
@@ -671,31 +700,39 @@ export default function App() {
             flexDirection: "column",
             minHeight: 0,
             overflow: "hidden",
-            border: (theme) => `1px solid ${theme.palette.divider}`,
-            backdropFilter: "blur(12px)",
-            backgroundColor: "rgba(255,255,255,0.92)",
+            // M3 tonal elevation: surfaceContainer alto, sin borde duro ni blur.
+            backgroundColor: "surfaceContainer.lowest",
+            border: (theme) => `1px solid ${theme.vars?.palette?.divider ?? theme.palette.divider}`,
+            boxShadow: (theme) =>
+              "0 1px 2px rgba(32, 27, 19, 0.06), 0 1px 3px rgba(32, 27, 19, 0.04)",
           }}
         >
-          {/* Header */}
-          <Box sx={{ position: 'relative', px: { xs: 2, md: 3 }, pt: { xs: 1.75, md: 2.25 }, pb: 1.25, flexShrink: 0 }}>
+          {/* Header — M3 sticky surfaceContainer con divider inferior sutil. */}
+          <Box
+            sx={{
+              position: "sticky",
+              top: 0,
+              zIndex: 2,
+              px: { xs: 2, md: 3 },
+              pt: { xs: 1.5, md: 2 },
+              pb: 1.25,
+              flexShrink: 0,
+              bgcolor: "surfaceContainer.low",
+              borderBottom: (theme) => `1px solid ${theme.vars?.palette?.divider ?? theme.palette.divider}`,
+            }}
+          >
             <Stack
-              direction={{ xs: "column", sm: "row" }}
+              direction="row"
               justifyContent="space-between"
-              alignItems={{ xs: "flex-start", sm: "center" }}
+              alignItems="center"
               gap={1}
-              flexWrap="wrap"
             >
-              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                <Typography component="h1" variant="h5">
-                  Asistente de Cafe Central
+              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ minWidth: 0 }}>
+                <Typography component="h1" variant="h5" noWrap>
+                  Asistente de Café Central
                 </Typography>
               </Stack>
-              <Stack
-                direction="row"
-                spacing={0.5}
-                alignItems="center"
-                sx={{ position: 'absolute', top: { xs: '8px', md: '16px' }, right: { xs: '8px', md: '16px' } }}
-              >
+              <Stack direction="row" spacing={0.5} alignItems="center" sx={{ flexShrink: 0 }}>
                 <StatusPanel
                   downloading={downloading}
                   downloadPct={downloadPct}
@@ -762,9 +799,9 @@ export default function App() {
                 onChange={(_, expanded) => setShowTokenDetails(expanded)}
                 sx={{
                   mb: 1,
-                  borderRadius: 1.5,
-                  border: (theme) => `1px solid ${theme.palette.divider}`,
-                  backgroundColor: "rgba(255,255,255,0.75)",
+                  borderRadius: 2,
+                  border: (theme) => `1px solid ${theme.vars?.palette?.divider ?? theme.palette.divider}`,
+                  backgroundColor: "surfaceContainer.lowest",
                   "&:before": { display: "none" },
                 }}
               >
@@ -809,7 +846,6 @@ export default function App() {
               downloading={downloading}
               onChange={setQuestion}
               onSubmit={handleSubmit}
-              onQuickQuestion={submitQuestion}
               value={question}
             />
           </Box>

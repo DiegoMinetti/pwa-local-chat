@@ -67,7 +67,7 @@ describe("App", () => {
   it("muestra el encabezado y arranca el modelo automáticamente", async () => {
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: /asistente de cafe central/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /asistente de caf[eé] central/i })).toBeInTheDocument();
 
     await waitFor(() => {
       expect(createEngine).toHaveBeenCalled();

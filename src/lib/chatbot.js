@@ -20,11 +20,11 @@ export const SUGGESTED_QUESTIONS = [
   "¿Qué promociones tienen?",
 ];
 export const SYSTEM_PROMPT = [
-  "Sos el asistente virtual de Cafe Central.",
-  "Respondé SOLO usando la información del contexto provisto. No inventes datos.",
-  'Si la información no está disponible, respondé exactamente: "No tengo esa información."',
-  "Respondé siempre en español, en máximo dos frases cortas, con tono amable, formal y respetuoso.",
-  "No incluyas etiquetas, prefijos ni explicaciones meta.",
+  "Sos el asistente virtual de Café Central: respondé en español, en máximo dos frases cortas, con tono amable, formal y respetuoso, sin etiquetas ni prefijos.",
+  "Usá SOLO los datos del bloque «Información del negocio» y, si existen, los del bloque «Información actual» (fecha, hora, día de la semana) y «Historial resumido».",
+  "Cuando el cliente pregunte por el día, la hora de apertura/cierre o si están abiertos «hoy»/«ahora», usá «Información actual» para decidir. No inventes horarios.",
+  "Si el dato pedido no está en el contexto, decí amablemente que no lo tenés y ofrecé ayuda con otra consulta. No improvises.",
+  "Al citar precios, incluí el símbolo de moneda del campo metadata.moneda. Al citar horarios, mantené el formato HH:MM-HH:MM.",
 ].join("\n");
 
 export const DEFAULT_CONFIG = {
@@ -139,6 +139,58 @@ export function calculateContextTokens({ businessInfo = "", chatHistory = "", ad
   return total;
 }
 
+const DIAS_SEMANA = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
+const MESES = [
+  "enero", "febrero", "marzo", "abril", "mayo", "junio",
+  "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+];
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+/**
+ * Devuelve el bloque «Información actual» que se inyecta en cada turno para
+ * que el modelo pueda responder preguntas relativas a fecha/hora («abren
+ * hoy?», «qué día es», «hasta qué hora están»). Compacto: ~25-35 tokens.
+ *
+ * Acepta una fecha inyectable para que los tests no dependan del reloj.
+ */
+export function getCurrentContextInfo(now = new Date(), timeZone = undefined) {
+  // Usamos Intl con timeZone del cliente si está disponible; el navegador lo
+  // expone vía Intl.DateTimeFormat().resolvedOptions().timeZone.
+  const formatter = new Intl.DateTimeFormat("es-AR", {
+    timeZone,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(now);
+  const lookup = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+
+  const weekday = (lookup.weekday || "").toLowerCase();
+  const day = parseInt(lookup.day, 10) || now.getDate();
+  const monthName = (lookup.month || "").toLowerCase();
+  const year = lookup.year || String(now.getFullYear());
+  const hour = parseInt(lookup.hour, 10) || 0;
+  const minute = parseInt(lookup.minute, 10) || 0;
+
+  const hora = `${pad2(hour)}:${pad2(minute)}`;
+  const fecha = `${day} de ${monthName} de ${year}`;
+
+  return {
+    fecha,
+    hora,
+    dia_semana: weekday,
+    es_fin_de_semana: weekday === "sábado" || weekday === "domingo",
+    zona_horaria: timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || "local",
+  };
+}
+
 /**
  * Token budget available for the business-info block, given everything else
  * that must fit in the model window (system prompt, history, extra contexts,
@@ -171,6 +223,8 @@ export function buildMessages({
   additionalContexts = [],
   contextWindowSize = DEFAULT_CONFIG.contextWindowSize,
   maxTokens = DEFAULT_CONFIG.maxTokens,
+  now = new Date(),
+  clientTimeZone,
 }) {
   // Send only the sections of the business document relevant to this question,
   // within the available token budget (RAG-lite, see contextRetrieval.js).
@@ -184,8 +238,13 @@ export function buildMessages({
   });
   const compactInfo = selectRelevantBusinessInfo(businessInfo, question, infoBudget);
 
-  let userContent = `Contexto del negocio:\n${compactInfo}`;
-  
+  // Bloque de fecha/hora del cliente: ~25-35 tokens, lo usa el modelo para
+  // preguntas relativas a «hoy», «ahora», «qué día», etc.
+  const ahora = getCurrentContextInfo(now, clientTimeZone);
+
+  let userContent = `Información del negocio:\n${compactInfo || "(sin datos del negocio cargados)"}`;
+  userContent += `\n\nInformación actual: hoy es ${ahora.dia_semana} ${ahora.fecha}, hora ${ahora.hora} (${ahora.zona_horaria})${ahora.es_fin_de_semana ? ", fin de semana" : ""}.`;
+
   // Include additional contexts
   for (const ctx of additionalContexts) {
     if (ctx.content?.trim()) {
@@ -198,7 +257,7 @@ export function buildMessages({
       userContent += `\n\nContexto: ${ctx.name}\n${compactCtx}`;
     }
   }
-  
+
   // Include chat history if available
   if (chatHistory.trim()) {
     userContent += `\n\nHistorial de conversación:\n${chatHistory}`;
@@ -215,6 +274,34 @@ export function buildMessages({
   ];
 }
 
+/**
+ * Light sanitization for partial text while it streams: strips special tokens
+ * and cuts at prompt-echo markers, but never substitutes the fallback reply —
+ * the full sanitizeAssistantReply runs once streaming finishes.
+ */
+export function sanitizeStreamingText(rawText) {
+  if (!rawText || typeof rawText !== "string") return "";
+
+  let text = rawText.replace(/<\|[^>]*\|>/g, "");
+
+  const stopMarkers = [
+    /\nInformaci[oó]n del negocio\s*:/i,
+    /\nPregunta\s*:/i,
+    /\nCliente\s*:/i,
+    /\nContexto del negocio\s*:/i,
+    /\nRespuesta breve\s*:/i,
+  ];
+
+  for (const marker of stopMarkers) {
+    const match = text.match(marker);
+    if (match && typeof match.index === "number") {
+      text = text.slice(0, match.index);
+    }
+  }
+
+  return text.trimStart();
+}
+
 export function sanitizeAssistantReply(rawReply) {
   const fallback = FALLBACK_REPLY;
 
@@ -227,10 +314,10 @@ export function sanitizeAssistantReply(rawReply) {
   sanitized = sanitized.replace(/<\|[^>]+\|>/g, " ").trim();
 
   const stopMarkers = [
-    /\nContexto del negocio\s*:/i,
+    /\nInformaci[oó]n del negocio\s*:/i,
     /\nPregunta\s*:/i,
     /\nCliente\s*:/i,
-    /\nInformaci[oó]n del negocio\s*:/i,
+    /\nContexto del negocio\s*:/i,
     /\nRespuesta breve\s*:/i,
   ];
 
@@ -463,17 +550,31 @@ export function quickLookup(businessInfo, question) {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
 
+  // ---- Recomendaciones por día: «qué día conviene venir», «cuándo hay menos gente»
+  if (/convien|menos gente|tranquilo|sin gente|mejor dia|cuando ir/.test(q)) {
+    const recs = data.recomendaciones_por_dia;
+    if (!recs) return null;
+    const lines = Object.entries(recs).map(([day, txt]) => `${day}: ${txt}`);
+    return lines.join("\n");
+  }
+
   if (/horario|abre|cierra|cuando|lunes|viernes|sabado|domingo|manana|tarde/.test(q)) {
     const regular = data.horarios?.regular;
     if (!regular) return null;
     const lines = Object.entries(regular).map(([day, hours]) => `${day}: ${hours}`);
     if (data.horarios.cocina_cierra) lines.push(`Cocina: ${data.horarios.cocina_cierra}`);
+    // Sumar días especiales si existen.
+    if (Array.isArray(data.horarios.especiales) && data.horarios.especiales.length) {
+      for (const esp of data.horarios.especiales) {
+        lines.push(`${esp.fecha} (${esp.motivo}): ${esp.horario}`);
+      }
+    }
     return lines.join("\n");
   }
   if (/direcci|donde|ubicaci|calle|domicilio|llegar/.test(q)) {
     const suc = data.sucursales;
     if (!suc?.length) return null;
-    return suc.map((s) => `${s.nombre}: ${s.direccion}`).join("\n");
+    return suc.map((s) => `${s.nombre}: ${s.direccion} (${s.barrio ?? ""})`).join("\n");
   }
   if (/telefon|numero|contacto|llamar|whatsapp/.test(q)) {
     return data.local?.telefono ?? null;
@@ -497,23 +598,48 @@ export function quickLookup(businessInfo, question) {
       instagram ? ` o en nuestro Instagram (${instagram})` : ""
     }.`;
   }
+  // Cancelación se chequea ANTES que reservas: «¿cómo cancelo una reserva?»
+  // matchea ambas, pero la política es más útil que el genérico. El regex
+  // cubre conjugaciones: cancelar, cancelo, cancelás, cancelación.
+  if (/cancelaci[oó]n|cancelar|cancel\w{1,3}/.test(q)) {
+    return data.local?.politicas?.cancelacion_reservas ?? null;
+  }
   if (/reserva/.test(q)) {
     if (!data.servicios?.reservas) return null;
     const faq = data.faq?.find((f) => /reserva/i.test(f.pregunta));
-    return faq?.respuesta ?? "Sí, aceptamos reservas desde el sitio web o por teléfono.";
+    const canal = data.servicios?.reservas_canal ? ` Podés reservar por ${data.servicios.reservas_canal}.` : "";
+    return (faq?.respuesta ?? "Sí, aceptamos reservas desde el sitio web o por teléfono.") + canal;
   }
   if (/mascota|perro|gato|pet/.test(q)) {
     const hasPet = data.sucursales?.some((s) => s.pet_friendly);
-    return hasPet ? "Sí, somos pet friendly en las mesas del exterior." : null;
+    const nota = data.local?.politicas?.mascotas;
+    if (!hasPet && !nota) return null;
+    return [hasPet ? "Sí, somos pet friendly en las mesas del exterior." : null, nota].filter(Boolean).join(" ");
   }
-  if (/wifi|internet/.test(q)) {
-    return data.servicios?.wifi ? "Sí, contamos con WiFi disponible en todas las sucursales." : null;
+  if (/wifi|internet|clave|contrasena|contraseña|password/.test(q)) {
+    const w = data.local?.wifi ?? (data.servicios?.wifi ? { disponible: true } : null);
+    if (!w?.disponible) return null;
+    if (w.red && w.password) {
+      return `Sí: red "${w.red}", contraseña "${w.password}".${w.nota ? ` ${w.nota}` : ""}`;
+    }
+    return "Sí, contamos con WiFi disponible en todas las sucursales.";
   }
   if (/delivery|domicilio|envio/.test(q)) {
-    return data.servicios?.delivery ? "Sí, realizamos delivery." : null;
+    if (!data.servicios?.delivery) return null;
+    return data.servicios.delivery_cobertura
+      ? `Sí, realizamos delivery. ${data.servicios.delivery_cobertura}`
+      : "Sí, realizamos delivery.";
   }
   if (/takeaway|para llevar|llevar/.test(q)) {
     return data.servicios?.takeaway ? "Sí, tenemos servicio de takeaway (para llevar)." : null;
+  }
+  if (/cocina|ultima orden|ultima hora|ultima pedido/.test(q)) {
+    return data.horarios?.cocina_cierra
+      ? `La cocina cierra ${data.horarios.cocina_cierra}.`
+      : null;
+  }
+  if (/factura|facturacion|facturar/.test(q)) {
+    return data.local?.politicas?.facturacion ?? null;
   }
   if (/vegetarian|vegano|sin gluten|celiac|leche vegetal/.test(q)) {
     const d = data.dietas_y_opciones;
@@ -522,11 +648,31 @@ export function quickLookup(businessInfo, question) {
     if (d.vegetariano) opts.push("opciones vegetarianas");
     if (d.vegano) opts.push("opciones veganas");
     if (d.sin_gluten) opts.push("sin gluten");
-    if (d.leche_vegetal_disponible?.length)
-      opts.push(`leche vegetal (${d.leche_vegetal_disponible.join(", ")})`);
+    const leche = d.leche_vegetal ?? d.leche_vegetal_disponible;
+    if (leche?.length) opts.push(`leche vegetal (${leche.join(", ")})`);
     return opts.length ? `Sí, contamos con: ${opts.join(", ")}.` : null;
   }
-  if (/nombre|que es|que hacen|dedica|descripci|cafeteria/.test(q)) {
+  // Destacados del menú: match cuando piden recomendación genérica de
+  // comida. NO matchear «qué día conviene» (eso lo cubre
+  // recomendaciones_por_dia). La idea: si dicen «recomendá» sin más,
+  // devolvemos destacados del menú; si dicen «qué día conviene», mostramos
+  // recomendaciones por día. Priorizamos destacados para no devolver
+  // info genérica cuando el cliente probablemente quiere un plato.
+  if (
+    /destacad|mas pedido|mas popular|signature|plato recomend|recomend.*(comida|plato|cafe|menu|para comer|para tomar)/.test(q) ||
+    (/recomend/.test(q) && !/dia|venir|ir|menos gente|tranquilo/.test(q))
+  ) {
+    const d = data.menu?.destacados;
+    if (!Array.isArray(d) || !d.length) return null;
+    const sym = data.metadata?.simbolo_moneda ?? "";
+    return d.map((p) => `${p.nombre}: ${sym}${p.precio.toLocaleString("es")}`).join("\n");
+  }
+  if (/menu|carta/.test(q)) {
+    const cats = data.menu?.categorias;
+    if (!cats) return null;
+    return Object.keys(cats).join(", ");
+  }
+  if (/nombre|que es|que hacen|dedica|descripci|cafeteria|quienes son/.test(q)) {
     return data.local?.descripcion ?? null;
   }
   if (/hola|buenas|buen[oa]s|salud/.test(q)) {
@@ -545,10 +691,12 @@ export async function streamAssistantReply(engine, businessInfo, question, onTok
     chatHistory = "",
     additionalContexts = [],
     contextWindowSize = DEFAULT_CONFIG.contextWindowSize,
+    now,
+    clientTimeZone,
   } = config;
 
   const stream = await engine.chat.completions.create({
-    messages: buildMessages({ businessInfo, question, systemPrompt, chatHistory, additionalContexts, contextWindowSize, maxTokens }),
+    messages: buildMessages({ businessInfo, question, systemPrompt, chatHistory, additionalContexts, contextWindowSize, maxTokens, now, clientTimeZone }),
     stream: true,
     temperature,
     top_p: topP,
@@ -578,15 +726,17 @@ export async function getAssistantReply(engine, businessInfo, question, config =
     chatHistory = "",
     additionalContexts = [],
     contextWindowSize = DEFAULT_CONFIG.contextWindowSize,
+    now,
+    clientTimeZone,
   } = config;
 
   const response = await engine.chat.completions.create({
-    messages: buildMessages({ businessInfo, question, systemPrompt, chatHistory, additionalContexts, contextWindowSize, maxTokens }),
+    messages: buildMessages({ businessInfo, question, systemPrompt, chatHistory, additionalContexts, contextWindowSize, maxTokens, now, clientTimeZone }),
     temperature,
     top_p: topP,
     repetition_penalty: repetitionPenalty,
     max_tokens: maxTokens,
-    stop: ["\nContexto del negocio:", "\nPregunta:", "\nCliente:"],
+    stop: ["\nInformación del negocio:", "\nPregunta:", "\nCliente:"],
   });
   return sanitizeAssistantReply(response.choices?.[0]?.message?.content);
 }
@@ -602,6 +752,8 @@ export function calculateMessagesTokens({
   additionalContexts = [],
   responseLength = 0, // tokens in the response
   contextWindowSize = DEFAULT_CONFIG.contextWindowSize,
+  now,
+  clientTimeZone,
 }) {
   const messages = buildMessages({
     businessInfo,
@@ -611,6 +763,8 @@ export function calculateMessagesTokens({
     additionalContexts,
     contextWindowSize,
     maxTokens: responseLength || DEFAULT_CONFIG.maxTokens,
+    now,
+    clientTimeZone,
   });
 
   let totalTokens = 0;

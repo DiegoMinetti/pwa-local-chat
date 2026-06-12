@@ -3,6 +3,7 @@ import {
   BUSINESS_DOC_PATH,
   FALLBACK_REPLY,
   fetchDynamicContexts,
+  getCurrentContextInfo,
   MODEL_ID,
   normalizeDynamicSources,
   SUGGESTED_QUESTIONS,
@@ -15,22 +16,39 @@ import {
   loadBusinessDocument,
   quickLookup,
   sanitizeAssistantReply,
+  sanitizeStreamingText,
   toDynamicContext
 } from "./chatbot";
 
 describe("chatbot helpers", () => {
-  it("buildMessages arma el prompt con sistema, negocio y pregunta", () => {
+  it("buildMessages arma el prompt con sistema, negocio, info_actual y pregunta", () => {
     const messages = buildMessages({
       businessInfo: "Horario: 8 a 18",
-      question: "Cual es el horario?"
+      question: "Cual es el horario?",
+      now: new Date("2026-06-11T14:30:00Z"),
+      clientTimeZone: "UTC",
     });
 
     expect(messages).toHaveLength(2);
     expect(messages[0].content).toContain(SYSTEM_PROMPT);
-    expect(messages[0].content).toContain("Respondé siempre en español");
     expect(messages[0].content).toContain("tono amable, formal y respetuoso");
+    // El bloque «Información actual» se inyecta en el user message.
+    expect(messages[1].content).toContain("Información del negocio");
+    expect(messages[1].content).toContain("Información actual");
+    expect(messages[1].content).toMatch(/hoy es \w+/);
+    expect(messages[1].content).toMatch(/hora \d{2}:\d{2}/);
     expect(messages[1].content).toContain("Horario: 8 a 18");
     expect(messages[1].content).toContain("Pregunta: Cual es el horario?");
+  });
+
+  it("buildMessages sin businessInfo no rompe y marca el bloque como vacío", () => {
+    const messages = buildMessages({
+      businessInfo: "",
+      question: "Hola?",
+    });
+
+    expect(messages[1].content).toContain("(sin datos del negocio cargados)");
+    expect(messages[1].content).toContain("Información actual");
   });
 
   it("loadBusinessDocument descarga el archivo local", async () => {
@@ -112,6 +130,41 @@ describe("chatbot helpers", () => {
 
   it("sanitizeAssistantReply reemplaza 'No tengo esa información' por el fallback amable", () => {
     expect(sanitizeAssistantReply("No tengo esa información.")).toBe(FALLBACK_REPLY);
+  });
+
+  describe("sanitizeStreamingText", () => {
+    it("devuelve '' para entradas vacías o no string", () => {
+      expect(sanitizeStreamingText("")).toBe("");
+      expect(sanitizeStreamingText(null)).toBe("");
+      expect(sanitizeStreamingText(undefined)).toBe("");
+      expect(sanitizeStreamingText(42)).toBe("");
+    });
+
+    it("elimina tokens especiales del estilo <|im_end|>", () => {
+      expect(sanitizeStreamingText("Hola <|im_end|> mundo")).toBe("Hola  mundo");
+    });
+
+    it("corta al encontrar el marcador de contexto del negocio", () => {
+      const stream = "Respuesta: 8 a 20.\nContexto del negocio: ...";
+      expect(sanitizeStreamingText(stream)).toBe("Respuesta: 8 a 20.");
+    });
+
+    it("corta al encontrar el marcador de pregunta del cliente", () => {
+      const stream = "Te esperamos pronto.\nPregunta: Hola";
+      expect(sanitizeStreamingText(stream)).toBe("Te esperamos pronto.");
+    });
+
+    it("corta al encontrar el marcador de cliente o respuesta breve", () => {
+      expect(sanitizeStreamingText("Hola\nCliente: chau")).toBe("Hola");
+      expect(sanitizeStreamingText("Hola\nRespuesta breve: otra cosa")).toBe("Hola");
+      expect(sanitizeStreamingText("Hola\nInformación del negocio: foo")).toBe("Hola");
+    });
+
+    it("no sustituye por fallback: si el texto queda vacío, devuelve ''", () => {
+      // Diferencia clave con sanitizeAssistantReply: el streaming nunca debe
+      // mostrar el fallback durante el reveal, solo cuando termina.
+      expect(sanitizeStreamingText("<|im_start|>")).toBe("");
+    });
   });
 
   it("expone la ruta esperada del archivo de negocio", () => {
@@ -382,6 +435,127 @@ describe("chatbot helpers", () => {
     it("usa los valores por defecto de DEFAULT_CONFIG si no se pasan parámetros", () => {
       const budget = computeHistoryBudget({});
       expect(budget).toBeGreaterThan(150);
+    });
+  });
+
+  describe("getCurrentContextInfo", () => {
+    it("devuelve fecha, hora y día formateados en español para una fecha fija", () => {
+      const ctx = getCurrentContextInfo(
+        new Date("2026-06-11T14:30:00Z"),
+        "UTC"
+      );
+
+      expect(ctx.dia_semana).toBe("jueves");
+      expect(ctx.hora).toBe("14:30");
+      expect(ctx.fecha).toContain("11 de junio de 2026");
+      expect(ctx.es_fin_de_semana).toBe(false);
+      expect(ctx.zona_horaria).toBe("UTC");
+    });
+
+    it("marca sábado y domingo como fin de semana", () => {
+      const sat = getCurrentContextInfo(new Date("2026-06-13T10:00:00Z"), "UTC");
+      const sun = getCurrentContextInfo(new Date("2026-06-14T10:00:00Z"), "UTC");
+      expect(sat.es_fin_de_semana).toBe(true);
+      expect(sun.es_fin_de_semana).toBe(true);
+    });
+
+    it("respeta una zona horaria distinta (UTC-3 → resta 3h)", () => {
+      const ctx = getCurrentContextInfo(
+        new Date("2026-06-11T17:30:00Z"),
+        "America/Argentina/Buenos_Aires"
+      );
+
+      // 17:30 UTC = 14:30 en Buenos Aires
+      expect(ctx.hora).toBe("14:30");
+      expect(ctx.zona_horaria).toBe("America/Argentina/Buenos_Aires");
+    });
+
+    it("produce un bloque compacto (<200 caracteres)", () => {
+      const ctx = getCurrentContextInfo(
+        new Date("2026-06-11T14:30:00Z"),
+        "UTC"
+      );
+      const serialized = JSON.stringify(ctx);
+      expect(serialized.length).toBeLessThan(200);
+    });
+  });
+
+  describe("quickLookup — nuevos paths", () => {
+    const fullDoc = JSON.stringify({
+      local: {
+        nombre: "Café Central",
+        telefono: "+54 11 4567 8899",
+        wifi: {
+          disponible: true,
+          red: "CafeCentral_Guest",
+          password: "cafecentral2026",
+        },
+        politicas: {
+          cancelacion_reservas: "Cancelar con al menos 2 horas de anticipación por WhatsApp o teléfono.",
+          facturacion: "Factura A y B. Solicitar al momento del pago.",
+        },
+      },
+      horarios: {
+        regular: { lunes: "08:00 - 20:00" },
+        cocina_cierra: "30 minutos antes del cierre del local",
+      },
+      servicios: { delivery: true, reservas: true, reservas_canal: "sitio web, WhatsApp o teléfono" },
+      menu: {
+        moneda: "ARS",
+        destacados: [
+          { nombre: "Avocado Toast", precio: 7800 },
+          { nombre: "Cappuccino", precio: 3200 },
+        ],
+        categorias: { cafes: [], brunch: [], pasteleria: [], almuerzos: [] },
+      },
+      recomendaciones_por_dia: {
+        lunes: "Tranquilo, ideal para trabajar.",
+        sabado: "Día pico. Sugerimos reservar.",
+      },
+    });
+
+    it("devuelve la contraseña de WiFi cuando preguntan por la clave", () => {
+      const reply = quickLookup(fullDoc, "¿Cuál es la clave del WiFi?");
+      expect(reply).toContain("CafeCentral_Guest");
+      expect(reply).toContain("cafecentral2026");
+    });
+
+    it("devuelve la política de cancelación cuando preguntan cómo cancelar", () => {
+      const reply = quickLookup(fullDoc, "¿Cómo cancelo una reserva?");
+      expect(reply).toContain("2 horas de anticipación");
+    });
+
+    it("devuelve la política de facturación cuando preguntan por factura", () => {
+      const reply = quickLookup(fullDoc, "¿Hacen factura A?");
+      expect(reply).toContain("Factura A y B");
+    });
+
+    it("devuelve el horario de cocina cuando preguntan por la cocina", () => {
+      const reply = quickLookup(fullDoc, "¿A qué hora cierra la cocina?");
+      expect(reply).toContain("30 minutos antes del cierre");
+    });
+
+    it("devuelve recomendaciones de día cuando preguntan qué día conviene", () => {
+      const reply = quickLookup(fullDoc, "¿Qué día conviene venir?");
+      expect(reply).toContain("lunes: Tranquilo");
+      expect(reply).toContain("sabado: Día pico");
+    });
+
+    it("devuelve los destacados del menú cuando preguntan qué recomiendan", () => {
+      const reply = quickLookup(fullDoc, "¿Qué me recomendás?");
+      expect(reply).toContain("Avocado Toast");
+      expect(reply).toContain("Cappuccino");
+    });
+
+    it("lista las categorías cuando preguntan por la carta", () => {
+      const reply = quickLookup(fullDoc, "¿Tienen carta?");
+      expect(reply).toContain("cafes");
+      expect(reply).toContain("brunch");
+    });
+
+    it("incluye el canal de reservas en la respuesta de reservas", () => {
+      const reply = quickLookup(fullDoc, "¿Aceptan reservas?");
+      expect(reply).toContain("sitio web");
     });
   });
 });

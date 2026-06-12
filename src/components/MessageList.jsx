@@ -14,6 +14,8 @@ export default function MessageList({ messages }) {
         const isBot = message.author === "Bot";
         const isPending = Boolean(message.pending);
         const isStreaming = Boolean(message.streaming);
+        const hasText = Boolean(message.text) && message.text !== "...";
+        const showDots = isPending || (isStreaming && !hasText);
 
         return (
           <Box
@@ -22,6 +24,11 @@ export default function MessageList({ messages }) {
               display: "flex",
               justifyContent: isBot ? "flex-start" : "flex-end",
               px: 1,
+              animation: "msgIn 0.25s ease-out",
+              "@keyframes msgIn": {
+                from: { opacity: 0, transform: "translateY(8px)" },
+                to: { opacity: 1, transform: "translateY(0)" },
+              },
             }}
           >
             <Paper
@@ -30,21 +37,21 @@ export default function MessageList({ messages }) {
                 maxWidth: { xs: "86%", sm: "70%" },
                 px: 2,
                 py: 1.25,
-                bgcolor: isBot ? "grey.100" : "primary.main",
-                color: isBot ? "text.primary" : "white",
-                borderRadius: isBot ? "4px 18px 18px 18px" : "18px 4px 18px 18px",
+                bgcolor: isBot ? "surfaceContainer.high" : "primary.container",
+                color: isBot ? "text.primary" : "primary.onContainer",
+                borderRadius: isBot ? "6px 20px 20px 20px" : "20px 6px 20px 20px",
               }}
             >
               {isBot && (
                 <Typography
                   variant="caption"
-                  fontWeight={700}
+                  fontWeight={600}
                   sx={{ display: "block", mb: 0.25, opacity: 0.55 }}
                 >
                   Asistente
                 </Typography>
               )}
-              {isPending || isStreaming ? (
+              {showDots ? (
                 <Box sx={{ display: "flex", gap: "5px", alignItems: "center", height: 22 }}>
                   {[0, 1, 2].map((i) => (
                     <Box
@@ -65,11 +72,25 @@ export default function MessageList({ messages }) {
                   ))}
                 </Box>
               ) : (
-                <Typography
-                  variant="body1"
-                  sx={{ whiteSpace: "pre-wrap", lineHeight: 1.55 }}
-                >
+                <Typography variant="body1" sx={{ whiteSpace: "pre-wrap" }}>
                   {message.text}
+                  {isStreaming && (
+                    <Box
+                      component="span"
+                      sx={{
+                        display: "inline-block",
+                        width: "2px",
+                        height: "1em",
+                        ml: "2px",
+                        verticalAlign: "text-bottom",
+                        bgcolor: "primary.main",
+                        animation: "caretBlink 0.9s steps(1) infinite",
+                        "@keyframes caretBlink": {
+                          "50%": { opacity: 0 },
+                        },
+                      }}
+                    />
+                  )}
                 </Typography>
               )}
             </Paper>

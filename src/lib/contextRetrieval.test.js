@@ -34,6 +34,18 @@ describe("matchBusinessSections", () => {
   it("devuelve vacío sin coincidencias", () => {
     expect(matchBusinessSections("gracias por todo")).toEqual([]);
   });
+
+  it("detecta recomendaciones por día", () => {
+    expect(matchBusinessSections("¿Qué día conviene venir?")).toContain(
+      "recomendaciones_por_dia"
+    );
+    expect(matchBusinessSections("¿Cuándo hay menos gente?")).toContain(
+      "recomendaciones_por_dia"
+    );
+    expect(matchBusinessSections("¿Cuándo ir para que esté tranquilo?")).toContain(
+      "recomendaciones_por_dia"
+    );
+  });
 });
 
 describe("selectRelevantBusinessInfo", () => {

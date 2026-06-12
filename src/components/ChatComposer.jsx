@@ -1,10 +1,10 @@
 import { forwardRef, useEffect, useRef } from "react";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
-import { Box, CircularProgress, IconButton, Stack, TextField, Tooltip } from "@mui/material";
+import { CircularProgress, IconButton, InputBase, Paper, Stack, Tooltip } from "@mui/material";
 
 export default forwardRef(function ChatComposer({ value, downloading, busy, onChange, onSubmit }, ref) {
   const inputRef = useRef(null);
-  
+
   // Expose input element to parent via ref
   useEffect(() => {
     if (ref) {
@@ -22,45 +22,68 @@ export default forwardRef(function ChatComposer({ value, downloading, busy, onCh
   const canSend = value.trim().length > 0;
 
   return (
-    <Stack
-      component="form"
-      direction={{ xs: "column", sm: "row" }}
-      gap={1}
-      onSubmit={onSubmit}
-    >
-      <TextField
-        fullWidth
-        inputRef={inputRef}
-        label={downloading ? "Escribí tu consulta (se enviará cuando la IA esté lista)" : "Pregunta del cliente"}
-        placeholder="Consultá horarios, dirección, pagos o promociones"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={handleKeyDown}
-      />
+    <Stack component="form" direction="row" alignItems="center" gap={1} onSubmit={onSubmit}>
+      <Paper
+        elevation={0}
+        sx={{
+          flex: 1,
+          display: "flex",
+          alignItems: "center",
+          px: 2.25,
+          minHeight: 52,
+          borderRadius: 999,
+          bgcolor: "surfaceContainer.high",
+          transition: "box-shadow 0.2s ease",
+          "&:focus-within": {
+            boxShadow: (theme) => `0 0 0 2px ${theme.palette.primary.main}`,
+          },
+        }}
+      >
+        <InputBase
+          fullWidth
+          inputRef={inputRef}
+          multiline
+          maxRows={4}
+          placeholder={
+            downloading
+              ? "Escribí tu consulta (se enviará cuando la IA esté lista)"
+              : "Escribí tu consulta…"
+          }
+          inputProps={{ "aria-label": "Pregunta del cliente" }}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={handleKeyDown}
+          sx={{ py: 1.25, fontSize: "1rem" }}
+        />
+      </Paper>
       <Tooltip title={downloading ? "Se enviará cuando la IA esté lista" : "Enviar (Enter)"} placement="top">
-        <Box sx={{ alignSelf: { xs: "stretch", sm: "center" }, flexShrink: 0 }}>
+        <span>
           <IconButton
             aria-label="Enviar"
             disabled={!canSend}
             type="submit"
-            fullWidth
             sx={{
-              width: { xs: "100%", sm: 48 },
-              height: 48,
-              bgcolor: canSend ? "primary.main" : "action.disabledBackground",
-              color: canSend ? "white" : "action.disabled",
-              borderRadius: { xs: 1, sm: "50%" },
-              "&:hover": { bgcolor: "primary.dark", color: "white" },
-              px: { xs: 1 },
+              width: 52,
+              height: 52,
+              flexShrink: 0,
+              bgcolor: canSend ? "primary.main" : "surfaceContainer.high",
+              color: canSend ? "primary.contrastText" : "text.disabled",
+              transition: "background-color 0.2s ease, transform 0.15s ease",
+              "&:hover": { bgcolor: canSend ? "primary.dark" : "surfaceContainer.highest" },
+              "&:active": { transform: "scale(0.92)" },
+              "&.Mui-disabled": {
+                bgcolor: "surfaceContainer.high",
+                color: "text.disabled",
+              },
             }}
           >
             {busy && !downloading ? (
-              <CircularProgress size={20} color="inherit" />
+              <CircularProgress size={22} color="inherit" />
             ) : (
               <SendRoundedIcon />
             )}
           </IconButton>
-        </Box>
+        </span>
       </Tooltip>
     </Stack>
   );
