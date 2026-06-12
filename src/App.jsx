@@ -174,6 +174,22 @@ export default function App() {
     setTokenInfo(tokens);
   }, [question, config, chatHistory]);
 
+  // Refresca el primer mensaje (bienvenida) cuando el usuario cambia el
+  // nombre del asistente en Configuración o cuando finalmente carga el JSON
+  // del negocio (que puede aportar `local.nombre`). No toca el resto del chat.
+  useEffect(() => {
+    const newWelcome = buildWelcomeMessage(
+      config.assistantName,
+      extractBusinessName(config.businessInfo)
+    );
+    setMessages((prev) => {
+      if (!prev.length) return prev;
+      if (prev[0].author !== "Bot") return prev;
+      if (prev[0].text === newWelcome) return prev;
+      return [{ ...prev[0], text: newWelcome }, ...prev.slice(1)];
+    });
+  }, [config.assistantName, config.businessInfo]);
+
   // Auto-clear del aviso de compresión después de 4s. Lo separamos del
   // setCompressionNotice para que el clear sea independiente del flujo.
   useEffect(() => {
