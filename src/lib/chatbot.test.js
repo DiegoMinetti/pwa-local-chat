@@ -195,8 +195,19 @@ describe("chatbot helpers", () => {
       expect(quickLookup(doc, "¿Tienen opciones vegetarianas?")).toMatch(/vegetarian/i);
     });
 
-    it("devuelve null para promociones — responde el modelo", () => {
-      expect(quickLookup(doc, "¿Qué promociones tienen?")).toBeNull();
+    it("responde promociones de forma determinística — nunca llega al modelo", () => {
+      const reply = quickLookup(doc, "¿Qué promociones tienen?");
+      expect(reply).toMatch(/no tengo promociones cargadas/i);
+    });
+
+    it("lista promociones cuando el documento las tiene", () => {
+      const withPromos = JSON.stringify({
+        ...JSON.parse(doc),
+        promociones: [{ nombre: "2x1 en café", descripcion: "Jueves de 18 a 20" }],
+      });
+      const reply = quickLookup(withPromos, "¿Qué promociones tienen?");
+      expect(reply).toMatch(/2x1 en café/);
+      expect(reply).toMatch(/Jueves de 18 a 20/);
     });
 
     it("devuelve null para preguntas que el modelo debe responder", () => {

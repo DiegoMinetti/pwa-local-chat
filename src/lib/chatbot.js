@@ -5,6 +5,7 @@ import {
   getModelById,
   getRuntimeLabel,
 } from "./modelCatalog";
+import { selectRelevantBusinessInfo } from "./contextRetrieval";
 
 export { AVAILABLE_MODELS, MODEL_ID };
 export const BUSINESS_DOC_PATH = "docs/negocio.txt";
@@ -138,15 +139,51 @@ export function calculateContextTokens({ businessInfo = "", chatHistory = "", ad
   return total;
 }
 
-export function buildMessages({ businessInfo, question, systemPrompt = SYSTEM_PROMPT, chatHistory = "", additionalContexts = [] }) {
-  // Minify JSON to reduce token count; fall back to original if not valid JSON.
-  let compactInfo = businessInfo.trim();
-  try {
-    compactInfo = JSON.stringify(JSON.parse(businessInfo));
-  } catch {
-    // plain-text format — use as-is
-  }
-  
+/**
+ * Token budget available for the business-info block, given everything else
+ * that must fit in the model window (system prompt, history, extra contexts,
+ * the question itself and the reserved response).
+ */
+export function computeBusinessInfoBudget({
+  contextWindowSize = DEFAULT_CONFIG.contextWindowSize,
+  systemPrompt = SYSTEM_PROMPT,
+  chatHistory = "",
+  additionalContexts = [],
+  question = "",
+  maxTokens = DEFAULT_CONFIG.maxTokens,
+} = {}) {
+  const fixedTokens =
+    estimateTokens(systemPrompt) +
+    estimateTokens(chatHistory) +
+    additionalContexts.reduce((sum, ctx) => sum + estimateTokens(ctx.content || ""), 0) +
+    estimateTokens(question) +
+    maxTokens + // potential response
+    80; // structural overhead
+
+  return Math.max(250, contextWindowSize - fixedTokens);
+}
+
+export function buildMessages({
+  businessInfo,
+  question,
+  systemPrompt = SYSTEM_PROMPT,
+  chatHistory = "",
+  additionalContexts = [],
+  contextWindowSize = DEFAULT_CONFIG.contextWindowSize,
+  maxTokens = DEFAULT_CONFIG.maxTokens,
+}) {
+  // Send only the sections of the business document relevant to this question,
+  // within the available token budget (RAG-lite, see contextRetrieval.js).
+  const infoBudget = computeBusinessInfoBudget({
+    contextWindowSize,
+    systemPrompt,
+    chatHistory,
+    additionalContexts,
+    question,
+    maxTokens,
+  });
+  const compactInfo = selectRelevantBusinessInfo(businessInfo, question, infoBudget);
+
   let userContent = `Contexto del negocio:\n${compactInfo}`;
   
   // Include additional contexts
@@ -447,7 +484,18 @@ export function quickLookup(businessInfo, question) {
     return medios.join(", ");
   }
   if (/promoci|descuento|oferta|promo/.test(q)) {
-    return null; // let the model answer
+    // Deterministic answer: small models tend to invent promotions when the
+    // document has none, so this topic never reaches the model.
+    const promos = data.promociones;
+    if (Array.isArray(promos) && promos.length) {
+      return promos
+        .map((p) => (typeof p === "string" ? p : `${p.nombre ?? p.titulo ?? "Promo"}: ${p.descripcion ?? p.detalle ?? ""}`.trim()))
+        .join("\n");
+    }
+    const instagram = data.local?.redes_sociales?.instagram;
+    return `Por el momento no tengo promociones cargadas. Te recomendamos consultar en el local${
+      instagram ? ` o en nuestro Instagram (${instagram})` : ""
+    }.`;
   }
   if (/reserva/.test(q)) {
     if (!data.servicios?.reservas) return null;
@@ -496,10 +544,11 @@ export async function streamAssistantReply(engine, businessInfo, question, onTok
     repetitionPenalty = DEFAULT_CONFIG.repetitionPenalty,
     chatHistory = "",
     additionalContexts = [],
+    contextWindowSize = DEFAULT_CONFIG.contextWindowSize,
   } = config;
 
   const stream = await engine.chat.completions.create({
-    messages: buildMessages({ businessInfo, question, systemPrompt, chatHistory, additionalContexts }),
+    messages: buildMessages({ businessInfo, question, systemPrompt, chatHistory, additionalContexts, contextWindowSize, maxTokens }),
     stream: true,
     temperature,
     top_p: topP,
@@ -528,10 +577,11 @@ export async function getAssistantReply(engine, businessInfo, question, config =
     repetitionPenalty = DEFAULT_CONFIG.repetitionPenalty,
     chatHistory = "",
     additionalContexts = [],
+    contextWindowSize = DEFAULT_CONFIG.contextWindowSize,
   } = config;
 
   const response = await engine.chat.completions.create({
-    messages: buildMessages({ businessInfo, question, systemPrompt, chatHistory, additionalContexts }),
+    messages: buildMessages({ businessInfo, question, systemPrompt, chatHistory, additionalContexts, contextWindowSize, maxTokens }),
     temperature,
     top_p: topP,
     repetition_penalty: repetitionPenalty,
@@ -551,6 +601,7 @@ export function calculateMessagesTokens({
   chatHistory = "",
   additionalContexts = [],
   responseLength = 0, // tokens in the response
+  contextWindowSize = DEFAULT_CONFIG.contextWindowSize,
 }) {
   const messages = buildMessages({
     businessInfo,
@@ -558,6 +609,8 @@ export function calculateMessagesTokens({
     systemPrompt,
     chatHistory,
     additionalContexts,
+    contextWindowSize,
+    maxTokens: responseLength || DEFAULT_CONFIG.maxTokens,
   });
 
   let totalTokens = 0;

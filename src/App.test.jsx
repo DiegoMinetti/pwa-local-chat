@@ -7,6 +7,11 @@ vi.mock("@mlc-ai/web-llm", () => ({}));
 vi.mock("./lib/capabilities", () => ({
   assessBrowserSupport: vi.fn(),
   getModelCompatibility: vi.fn(() => ({ compatible: true, reason: "Compatible.", backend: "webgpu" })),
+  getRecommendedSettings: vi.fn(() => ({
+    modelId: "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
+    fallbackModelIds: [],
+    contextWindowSize: 4096,
+  })),
 }));
 
 vi.mock("./lib/chatbot", async () => {
@@ -19,13 +24,13 @@ vi.mock("./lib/chatbot", async () => {
   };
 });
 
-import { assessBrowserSupport, getModelCompatibility } from "./lib/capabilities";
+import { assessBrowserSupport, getModelCompatibility, getRecommendedSettings } from "./lib/capabilities";
 import { createEngine, loadBusinessDocument, streamAssistantReply } from "./lib/chatbot";
 
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    
+
     // Mock localStorage to have saved config (not first load)
     const mockConfig = {
       modelId: "Phi-3.5-mini-instruct-q4f16_1-MLC",
@@ -38,9 +43,9 @@ describe("App", () => {
       businessInfo: ""
     };
     localStorage.setItem('cafe-central-config', JSON.stringify(mockConfig));
-    
-    assessBrowserSupport.mockResolvedValue({ 
-      supported: true, 
+
+    assessBrowserSupport.mockResolvedValue({
+      supported: true,
       message: "ok",
       runtimeSupport: { webgpu: true, wasm: true },
       deviceCapabilities: { isMobile: false, estimatedMemoryGB: 8, hasDeviceMemoryAPI: true }
@@ -59,41 +64,71 @@ describe("App", () => {
     localStorage.clear();
   });
 
-  it("muestra el encabezado principal", async () => {
+  it("muestra el encabezado y arranca el modelo automáticamente", async () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: /asistente de cafe central/i })).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(screen.getByText(/seleccioná un modelo en configuración/i)).toBeInTheDocument();
+      expect(createEngine).toHaveBeenCalled();
+      expect(screen.getAllByText(/ya puedo responder cualquier consulta/i).length).toBeGreaterThan(0);
     });
   });
 
-  it("envía una pregunta y muestra la respuesta", async () => {
+  it("en la primera visita elige el modelo recomendado para el dispositivo", async () => {
+    localStorage.clear();
+
     render(<App />);
 
-    // Wait for initial state to load
     await waitFor(() => {
-      const messages = screen.getAllByText(/seleccioná un modelo/i);
-      expect(messages.length).toBeGreaterThan(0);
+      expect(getRecommendedSettings).toHaveBeenCalled();
+      expect(createEngine).toHaveBeenCalled();
+    });
+  });
+
+  it("envía una pregunta y muestra la respuesta del modelo", async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/ya puedo responder cualquier consulta/i).length).toBeGreaterThan(0);
     });
 
-    // Simulate applying settings to trigger engine bootstrap
-    // This would normally happen via the settings panel, but we'll trigger it directly
-    // by finding and clicking the settings button, but for simplicity let's just verify
-    // that without the engine, questions can still be typed
-    
     fireEvent.change(screen.getAllByLabelText(/pregunta del cliente/i).at(-1), {
       target: { value: "Cual es el horario?" }
     });
 
+    fireEvent.click(screen.getAllByRole("button", { name: /enviar/i }).at(-1));
+
     await waitFor(() => {
-      const buttons = screen.getAllByRole("button", { name: /enviar/i });
-      expect(buttons.at(-1)).toBeEnabled();
+      expect(screen.getAllByText(/abrimos a las 8/i).length).toBeGreaterThan(0);
+    });
+    expect(streamAssistantReply).toHaveBeenCalled();
+  });
+
+  it("responde al instante con quickLookup sin usar el modelo", async () => {
+    loadBusinessDocument.mockResolvedValue(
+      JSON.stringify({
+        local: { nombre: "Café Central", telefono: "+54 11 4567 8899" },
+        horarios: { regular: { lunes: "08:00 - 20:00" } },
+      })
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/ya puedo responder cualquier consulta/i).length).toBeGreaterThan(0);
     });
 
-    // Note: Without engine loaded, the question will queue but not process
-    // This test now validates that the UI is functional even without a loaded model
+    fireEvent.change(screen.getAllByLabelText(/pregunta del cliente/i).at(-1), {
+      target: { value: "¿Cuál es el teléfono?" }
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: /enviar/i }).at(-1));
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/\+54 11 4567 8899/).length).toBeGreaterThan(0);
+    });
+    expect(streamAssistantReply).not.toHaveBeenCalled();
   });
 
   it("muestra errores de inicialización", async () => {
@@ -109,30 +144,34 @@ describe("App", () => {
     });
   });
 
-  it("si intenta enviar sin modelo cargado abre configuración y avisa", async () => {
+  it("si el modelo falla al cargar y se envía una consulta, abre configuración y avisa", async () => {
+    createEngine.mockRejectedValue(new Error("sin GPU"));
+
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getAllByRole("button", { name: /abrir configuración/i }).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/error de inicialización/i).length).toBeGreaterThan(0);
     });
 
     fireEvent.change(screen.getAllByLabelText(/pregunta del cliente/i).at(-1), {
-      target: { value: "¿Cuál es el horario?" },
+      target: { value: "¿Tienen promociones?" },
     });
 
     fireEvent.click(screen.getAllByRole("button", { name: /enviar/i }).at(-1));
 
     await waitFor(() => {
       expect(screen.getAllByRole("heading", { name: /configuración/i }).length).toBeGreaterThan(0);
-      expect(screen.getAllByText(/no hay un modelo cargado/i).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/no está disponible en este momento/i).length).toBeGreaterThan(0);
     });
   });
 
-  it("si cierra configuración sin aplicar y no hay modelo muestra aviso", async () => {
+  it("si cierra configuración sin modelo cargado muestra aviso", async () => {
+    createEngine.mockRejectedValue(new Error("sin GPU"));
+
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getAllByRole("button", { name: /abrir configuración/i }).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/error de inicialización/i).length).toBeGreaterThan(0);
     });
 
     fireEvent.click(screen.getAllByRole("button", { name: /abrir configuración/i }).at(-1));
@@ -144,7 +183,7 @@ describe("App", () => {
     fireEvent.click(screen.getAllByRole("button", { name: /cerrar configuración/i }).at(-1));
 
     await waitFor(() => {
-      expect(screen.getAllByText(/elegí un modelo principal/i).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/no está disponible en este momento/i).length).toBeGreaterThan(0);
     });
   });
 });

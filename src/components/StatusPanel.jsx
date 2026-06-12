@@ -1,14 +1,15 @@
 import { Box, Chip, LinearProgress, Stack, Typography } from "@mui/material";
 
-export default function StatusPanel({ downloading, downloadPct }) {
+export default function StatusPanel({ downloading, downloadPct, modelLabel, modelSize }) {
   if (!downloading) return null;
   const isCached = downloadPct === 100;
   const label = isCached ? "Inicializando" : "Descargando IA";
+  const modelName = modelLabel ? `${modelLabel}${modelSize ? ` (${modelSize})` : ""}` : "modelo";
   const subtext = isCached
     ? "Modelo descargado. Inicializando en el dispositivo…"
     : downloadPct !== null
-    ? `Descargando modelo… Solo se hace una vez. (${downloadPct}%)`
-    : "Preparando la descarga del modelo…";
+    ? `Descargando ${modelName} — solo la primera vez. (${downloadPct}%)`
+    : `Preparando la descarga de ${modelName}…`;
 
   return (
     <Stack spacing={0.5} sx={{ minWidth: 200 }}>

@@ -20,7 +20,7 @@ import MessageList from "./components/MessageList";
 import SettingsPanel from "./components/SettingsPanel";
 import StatusPanel from "./components/StatusPanel";
 import TokenCounter from "./components/TokenCounter";
-import { assessBrowserSupport, getModelCompatibility } from "./lib/capabilities";
+import { assessBrowserSupport, getModelCompatibility, getRecommendedSettings } from "./lib/capabilities";
 import {
   DEFAULT_CONFIG,
   calculateContextTokens,
@@ -43,7 +43,8 @@ let nextId = 1;
 const newId = () => String(nextId++);
 
 const CONFIG_STORAGE_KEY = 'cafe-central-config';
-const NO_MODEL_WARNING = "No hay un modelo cargado. Abrí Configuración, elegí un modelo principal y, si querés, fallbacks automáticos.";
+const NO_MODEL_WARNING = "El asistente con IA no está disponible en este momento. Igual puedo responder al instante las preguntas frecuentes, o podés revisar la Configuración.";
+const WELCOME_MESSAGE = "¡Hola! Soy el asistente de Café Central. ¿En qué puedo ayudarte?";
 
 function makeMsg(author, text, extra = {}) {
   return { id: newId(), author, text, ...extra };
@@ -56,12 +57,7 @@ export default function App() {
   const processingRef = useRef(false);
   const inputRef = useRef(null); // Chat input reference for global keyboard capture
 
-  const [messages, setMessages] = useState([
-    makeMsg(
-      "Bot",
-      "¡Hola! Seleccioná un modelo en configuración para empezar."
-    ),
-  ]);
+  const [messages, setMessages] = useState([makeMsg("Bot", WELCOME_MESSAGE)]);
   const [question, setQuestion] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [downloadPct, setDownloadPct] = useState(null);
@@ -93,6 +89,7 @@ export default function App() {
     }
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [loadingModelInfo, setLoadingModelInfo] = useState(null); // { label, size }
   const [chatHistory, setChatHistory] = useState("");
   const [tokenInfo, setTokenInfo] = useState({ contextTokens: 0, responseTokens: 0, totalTokens: 0 });
   const [showTokenDetails, setShowTokenDetails] = useState(false);
@@ -108,13 +105,6 @@ export default function App() {
   const chatHistoryRef = useRef("");
   chatHistoryRef.current = chatHistory;
 
-  // Open settings panel on first load (no saved config)
-  useEffect(() => {
-    if (isFirstBootstrap) {
-      setSettingsOpen(true);
-    }
-  }, [isFirstBootstrap]);
-
   // Update token info when question or config changes
   useEffect(() => {
     const tokens = calculateMessagesTokens({
@@ -124,6 +114,7 @@ export default function App() {
       chatHistory,
       additionalContexts: configRef.current.additionalContexts || [],
       responseLength: configRef.current.maxTokens, // potential max response
+      contextWindowSize: configRef.current.contextWindowSize,
     });
     setTokenInfo(tokens);
   }, [question, config, chatHistory]);
@@ -383,22 +374,44 @@ export default function App() {
       if (support.message !== "Entorno WebGPU listo.") {
         setError(support.message);
       }
-      
-      // Load business info
+
+      // Ask the browser to keep our storage (model weights) from being purged
+      // under disk pressure — critical on iOS, where Safari evicts caches.
       try {
-        const businessDoc = await loadBusinessDocument();
-        setConfig((c) => {
-          const updated = { ...c, businessInfo: businessDoc };
-          try {
-            localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(updated));
-          } catch (err) {
-            console.warn('Failed to save config:', err);
-          }
-          return updated;
-        });
+        navigator.storage?.persist?.();
+      } catch {
+        // best-effort only
+      }
+
+      // Load business info
+      let businessDoc = "";
+      try {
+        businessDoc = await loadBusinessDocument();
       } catch (err) {
         console.error('Failed to load business document:', err);
       }
+      if (cancelled) return;
+
+      // First visit: pick the best model for this device automatically so the
+      // assistant starts without requiring any configuration from the user.
+      const recommended = isFirstBootstrap ? getRecommendedSettings(support) : null;
+
+      setConfig((c) => {
+        const updated = {
+          ...c,
+          ...(recommended || {}),
+          ...(businessDoc ? { businessInfo: businessDoc } : {}),
+        };
+        try {
+          localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(updated));
+        } catch (err) {
+          console.warn('Failed to save config:', err);
+        }
+        return updated;
+      });
+
+      // Start loading the model right away (saved config or recommended one).
+      setBootKey((k) => (k === 0 ? 1 : k));
     }
 
     checkCapabilities();
@@ -419,7 +432,13 @@ export default function App() {
       setDownloading(true);
       setDownloadPct(null);
       setError("");
-      setMessages([makeMsg("Bot", "Cargando modelo, por favor esperá un momento…")]);
+      setMessages([
+        makeMsg("Bot", WELCOME_MESSAGE),
+        makeMsg(
+          "Bot",
+          "Estoy preparando la IA en tu dispositivo (la descarga se hace una sola vez). Mientras tanto respondo al instante las preguntas frecuentes de abajo."
+        ),
+      ]);
 
       const previousModelId = activeModelIdRef.current;
       await releaseCurrentEngine();
@@ -438,6 +457,7 @@ export default function App() {
         }
 
         try {
+          setLoadingModelInfo({ label: model?.label, size: model?.size });
           await maybeClearOldModelCache(previousModelId, candidateModelId);
           const runtimeModule = await loadModelRuntimeModule(candidateModelId);
           engine = await createEngine(
@@ -475,6 +495,7 @@ export default function App() {
       engineRef.current = engine;
       activeModelIdRef.current = selectedModel.id;
       setDownloading(false);
+      setLoadingModelInfo(null);
 
       if (selectedModel.id !== snapshot.modelId) {
         setError(
@@ -490,7 +511,7 @@ export default function App() {
       }
       setMessages((current) => [
         ...current,
-        makeMsg("Bot", "¡Listo! Soy el asistente de Cafe Central. ¿En qué puedo ayudarte?"),
+        makeMsg("Bot", "¡Listo! Ya puedo responder cualquier consulta sobre Café Central."),
       ]);
       processQueue();
     }
@@ -499,6 +520,7 @@ export default function App() {
       if (cancelled) return;
       console.error("No se pudo inicializar la app:", err);
       setDownloading(false);
+      setLoadingModelInfo(null);
       setError(err.message);
       setMessages((current) => [
         ...current,
@@ -526,24 +548,26 @@ export default function App() {
     setQuestion("");
     setError("");
 
-    // If there is no loaded model (and we are not currently downloading one),
-    // force configuration flow before accepting chat interactions.
+    // Instant path first: keyword lookup on the business document answers the
+    // most common questions immediately, with zero tokens and zero invention.
+    if (configRef.current.businessInfo) {
+      const quick = quickLookup(configRef.current.businessInfo, cleanQuestion);
+      if (quick) {
+        setMessages((current) => {
+          const next = [...current, makeMsg("Cliente", cleanQuestion), makeMsg("Bot", quick)];
+          const newHistory = generateChatSummary(next, computeHistoryBudget(configRef.current));
+          setChatHistory(newHistory);
+          chatHistoryRef.current = newHistory;
+          return next;
+        });
+        return;
+      }
+    }
+
+    // No model loaded and none on the way: surface the configuration flow.
     if (!engineRef.current && !downloading) {
       handleMissingModelWarning();
       return;
-    }
-
-    // While engine is still loading, try an instant text-search answer.
-    if (!engineRef.current && downloading && configRef.current.businessInfo) {
-      const quick = quickLookup(configRef.current.businessInfo, cleanQuestion);
-      if (quick) {
-        setMessages((current) => [
-          ...current,
-          makeMsg("Cliente", cleanQuestion),
-          makeMsg("Bot", quick),
-        ]);
-        return;
-      }
     }
 
     const botMsgId = newId();
@@ -672,7 +696,12 @@ export default function App() {
                 alignItems="center"
                 sx={{ position: 'absolute', top: { xs: '8px', md: '16px' }, right: { xs: '8px', md: '16px' } }}
               >
-                <StatusPanel downloading={downloading} downloadPct={downloadPct} />
+                <StatusPanel
+                  downloading={downloading}
+                  downloadPct={downloadPct}
+                  modelLabel={loadingModelInfo?.label}
+                  modelSize={loadingModelInfo?.size}
+                />
                 <Tooltip title="Configuración">
                   <IconButton
                     size="small"
@@ -692,11 +721,11 @@ export default function App() {
             </Box>
           ) : null}
 
-          {/* Suggested questions during model load */}
-          {downloading && (
+          {/* Suggested questions: visible until the customer asks something */}
+          {(downloading || !messages.some((m) => m.author === "Cliente")) && (
             <Box sx={{ px: { xs: 2, md: 3 }, pb: 1, flexShrink: 0 }}>
               <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.75 }}>
-                Preguntas frecuentes — respondé al instante:
+                Preguntas frecuentes — respuesta al instante:
               </Typography>
               <Stack direction="row" flexWrap="wrap" gap={0.75} useFlexGap>
                 {SUGGESTED_QUESTIONS.map((q) => (

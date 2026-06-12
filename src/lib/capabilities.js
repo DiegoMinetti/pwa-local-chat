@@ -1,4 +1,4 @@
-import { getModelById, getRuntimeLabel } from "./modelCatalog";
+import { DEFAULT_FALLBACK_MODEL_IDS, MODEL_ID, getModelById, getRuntimeLabel } from "./modelCatalog";
 
 /**
  * Estimate device memory and compute capability.
@@ -103,6 +103,63 @@ export function getModelCompatibility(modelId, browserSupportOrCapabilities) {
 
 export function isModelCompatible(modelId, browserSupportOrCapabilities) {
   return getModelCompatibility(modelId, browserSupportOrCapabilities).compatible;
+}
+
+/**
+ * Recommended model + window settings for the current device.
+ *
+ * Mobile (iPhone/Android) gets the lightest viable defaults: Safari iOS kills
+ * the tab near ~1.5-2 GB of memory, so the 1.5B model (1 GB of weights plus
+ * KV cache and runtime) is too risky there. A 2048-token window also halves
+ * the KV cache and speeds up engine startup.
+ */
+export function getRecommendedSettings(browserSupport) {
+  const capabilities = browserSupport?.deviceCapabilities || getDeviceCapabilities();
+  const hasWebGPU = Boolean(browserSupport?.runtimeSupport?.webgpu);
+
+  if (capabilities.isMobile) {
+    return hasWebGPU
+      ? {
+          modelId: "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
+          fallbackModelIds: [
+            "SmolLM2-360M-Instruct-q4f16_1-MLC",
+            "onnx-community/Qwen2.5-0.5B-Instruct",
+            "HuggingFaceTB/SmolLM2-360M-Instruct",
+          ],
+          contextWindowSize: 2048,
+        }
+      : {
+          modelId: "onnx-community/Qwen2.5-0.5B-Instruct",
+          fallbackModelIds: ["HuggingFaceTB/SmolLM2-360M-Instruct"],
+          contextWindowSize: 2048,
+        };
+  }
+
+  if (!hasWebGPU) {
+    return {
+      modelId: "onnx-community/Qwen2.5-0.5B-Instruct",
+      fallbackModelIds: ["HuggingFaceTB/SmolLM2-360M-Instruct"],
+      contextWindowSize: 2048,
+    };
+  }
+
+  if (capabilities.estimatedMemoryGB < 4) {
+    return {
+      modelId: "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
+      fallbackModelIds: [
+        "SmolLM2-360M-Instruct-q4f16_1-MLC",
+        "onnx-community/Qwen2.5-0.5B-Instruct",
+        "HuggingFaceTB/SmolLM2-360M-Instruct",
+      ],
+      contextWindowSize: 2048,
+    };
+  }
+
+  return {
+    modelId: MODEL_ID,
+    fallbackModelIds: [...DEFAULT_FALLBACK_MODEL_IDS],
+    contextWindowSize: 4096,
+  };
 }
 
 export async function assessBrowserSupport({
