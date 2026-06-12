@@ -72,7 +72,6 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(createEngine).toHaveBeenCalled();
-      expect(screen.getAllByText(/ya puedo responder cualquier consulta/i).length).toBeGreaterThan(0);
     });
   });
 
@@ -91,7 +90,7 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getAllByText(/ya puedo responder cualquier consulta/i).length).toBeGreaterThan(0);
+      expect(createEngine).toHaveBeenCalled();
     });
 
     fireEvent.change(screen.getAllByLabelText(/pregunta del cliente/i).at(-1), {
@@ -144,7 +143,7 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getAllByText(/ya puedo responder cualquier consulta/i).length).toBeGreaterThan(0);
+      expect(createEngine).toHaveBeenCalled();
     });
 
     fireEvent.change(screen.getAllByLabelText(/pregunta del cliente/i).at(-1), {

@@ -3,6 +3,7 @@ import {
   BUSINESS_DOC_PATH,
   FALLBACK_REPLY,
   fetchDynamicContexts,
+  detectCustomerLanguage,
   estimateContextOverflow,
   generateChatSummary,
   getCurrentContextInfo,
@@ -10,6 +11,7 @@ import {
   normalizeDynamicSources,
   SUGGESTED_QUESTIONS,
   SYSTEM_PROMPT,
+  buildIntakeNextStep,
   buildMessages,
   buildSystemPrompt,
   DEFAULT_ASSISTANT_NAME,
@@ -51,17 +53,123 @@ describe("chatbot helpers", () => {
 
   it("buildSystemPrompt incluye el nombre con regla dura de identidad", () => {
     const prompt = buildSystemPrompt("Martina");
-    expect(prompt).toContain("Tu nombre es Martina");
+    expect(prompt).toContain("Martina");
     expect(prompt).toContain('"Me llamo Martina"');
-    expect(prompt).toContain("cálido, amable y proactivo");
     expect(prompt).toContain("ya te averiguo");
     expect(prompt).toMatch(/voseo|vos/i);
-    expect(prompt).toContain("ÚNICA fuente de datos");
+    expect(prompt).toContain("ÚNICA fuente");
+    expect(prompt).toContain("No tengo ese dato cargado");
   });
 
   it("buildSystemPrompt cae al default si el nombre es vacío", () => {
     const prompt = buildSystemPrompt("   ");
     expect(prompt).toContain(DEFAULT_ASSISTANT_NAME);
+  });
+
+  it("buildSystemPrompt tiene una longitud razonable (entre 600 y 1600 chars)", () => {
+    const prompt = buildSystemPrompt();
+    // Arquitectura para modelos chicos: ni novela ni telegrama.
+    expect(prompt.length).toBeGreaterThan(600);
+    expect(prompt.length).toBeLessThan(1600);
+  });
+
+  it("buildSystemPrompt cubre las 4 dimensiones críticas: identidad, tono, datos, fuera de scope", () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toMatch(/# Identidad|#IDENTIDAD/);
+    expect(prompt).toMatch(/# Tono|#TONO/);
+    expect(prompt).toMatch(/# Datos|#DATOS/);
+    expect(prompt).toMatch(/# Fuera de scope|#FUERA DE SCOPE/);
+  });
+
+  it("detectCustomerLanguage detecta español por default", () => {
+    expect(detectCustomerLanguage("¿Cuál es el horario?")).toBe("es");
+    expect(detectCustomerLanguage("Hola, ¿tienen medialunas?")).toBe("es");
+    expect(detectCustomerLanguage("")).toBe("es");
+  });
+
+  it("detectCustomerLanguage detecta inglés cuando hay stopwords EN claras", () => {
+    expect(detectCustomerLanguage("Hi, do you have wifi?")).toBe("en");
+    expect(detectCustomerLanguage("Hello, what time do you open?")).toBe("en");
+  });
+
+  it("detectCustomerLanguage no confunde español con palabras sueltas en inglés", () => {
+    // Una sola palabra en inglés no debería disparar la detección.
+    expect(detectCustomerLanguage("Hola, ¿tienen delivery?")).toBe("es");
+  });
+
+  it("buildMessages inyecta la regla de idioma solo si NO es español", () => {
+    const messagesEn = buildMessages({
+      businessInfo: "{}",
+      question: "Hello, what time do you open?",
+      now: new Date("2026-06-11T14:30:00Z"),
+      clientTimeZone: "UTC",
+    });
+    expect(messagesEn[1].content).toContain("Idioma: el cliente escribió en inglés");
+
+    const messagesEs = buildMessages({
+      businessInfo: "{}",
+      question: "¿A qué hora abren?",
+      now: new Date("2026-06-11T14:30:00Z"),
+      clientTimeZone: "UTC",
+    });
+    expect(messagesEs[1].content).not.toContain("Idioma:");
+  });
+
+  describe("buildIntakeNextStep", () => {
+    it("primer paso: saludo + pregunta el nombre (sin revelar carga)", () => {
+      const step = buildIntakeNextStep({ questionAsked: null });
+      expect(step.kind).toBe("greeting");
+      expect(step.text).toContain("Hola");
+      expect(step.text).toContain("llamás");
+      // No debe mencionar descarga, modelo, IA, preparación.
+      expect(step.text.toLowerCase()).not.toMatch(/descarg|modelo|ia|preparando|cargando/);
+    });
+
+    it("personaliza con el nombre del local si está disponible", () => {
+      const step = buildIntakeNextStep({ questionAsked: null }, "Martín", "Café Central");
+      expect(step.text).toContain("de Café Central");
+    });
+
+    it("después del saludo espera al cliente (no dispara otra pregunta hasta tener nombre)", () => {
+      const step = buildIntakeNextStep({ questionAsked: "greeting" });
+      expect(step).toBeNull();
+    });
+
+    it("con nombre, siguiente paso: pregunta el motivo usando el nombre", () => {
+      const step = buildIntakeNextStep({
+        questionAsked: "greeting",
+        name: "Juan",
+      });
+      expect(step.kind).toBe("topic");
+      expect(step.text).toContain("Juan");
+    });
+
+    it("después de preguntar el motivo espera al cliente", () => {
+      const step = buildIntakeNextStep({
+        questionAsked: "topic",
+        name: "Juan",
+      });
+      expect(step).toBeNull();
+    });
+
+    it("si el motivo es muy corto (1-2 palabras), pide clarificación", () => {
+      const step = buildIntakeNextStep({
+        questionAsked: "topic",
+        name: "Juan",
+        topic: "horario",
+      });
+      expect(step.kind).toBe("clarify");
+      expect(step.text.toLowerCase()).toMatch(/contame|decime/);
+    });
+
+    it("con motivo claro, no hace más preguntas (espera al cliente)", () => {
+      const step = buildIntakeNextStep({
+        questionAsked: "topic",
+        name: "Juan",
+        topic: "quiero saber el horario de hoy y si tienen mesa para 4",
+      });
+      expect(step).toBeNull();
+    });
   });
 
   it("quickLookup usa el assistantName configurable en el saludo", () => {

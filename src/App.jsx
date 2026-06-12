@@ -20,12 +20,16 @@ import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import ChatComposer from "./components/ChatComposer";
 import MessageList from "./components/MessageList";
 import SettingsPanel from "./components/SettingsPanel";
-import StatusPanel from "./components/StatusPanel";
+// StatusPanel ya no se muestra en el header: el cliente no debe notar
+// que se está cargando un modelo. El componente sigue existiendo
+// (src/components/StatusPanel.jsx) por si en el futuro queremos
+// re-exponerlo detrás de un toggle de "modo debug".
 import TokenCounter from "./components/TokenCounter";
 import { assessBrowserSupport, getModelCompatibility, getRecommendedSettings } from "./lib/capabilities";
 import {
   DEFAULT_ASSISTANT_NAME,
   DEFAULT_CONFIG,
+  buildIntakeNextStep,
   calculateMessagesTokens,
   computeHistoryBudget,
   createEngine,
@@ -48,23 +52,10 @@ const CONFIG_STORAGE_KEY = 'cafe-central-config';
 const NO_MODEL_WARNING = "El asistente con IA no está disponible en este momento. Igual puedo responder al instante las preguntas frecuentes, o podés revisar la Configuración.";
 
 /**
- * Mensaje de bienvenida. Se construye en runtime (no como constante) para que
- * respete el `assistantName` configurado por el usuario y el nombre del
- * negocio que venga en el JSON (`local.nombre`). Si el JSON todavía no
- * cargó, usa un genérico.
- */
-function buildWelcomeMessage(assistantName, businessName) {
-  const name = (assistantName || DEFAULT_ASSISTANT_NAME).trim() || DEFAULT_ASSISTANT_NAME;
-  const biz = (businessName || "").trim();
-  const where = biz ? ` del equipo de ${biz}` : "";
-  return `¡Hola! Soy ${name}${where}. ¿En qué te puedo ayudar?`;
-}
-
-/**
  * Extrae `local.nombre` del JSON del negocio. Devuelve "" si el documento
- * no es JSON o si la sección no existe. Se usa solo para el saludo del
- * mensaje de bienvenida (la respuesta a preguntas concretas sigue
- * pasando por `quickLookup` + el modelo).
+ * no es JSON o si la sección no existe. Se usa para personalizar las
+ * preguntas del intake (saludo + "¿en qué te puedo ayudar?") con el
+ * nombre del local.
  */
 function extractBusinessName(businessInfo) {
   if (!businessInfo) return "";
@@ -101,7 +92,7 @@ export default function App() {
     } catch {
       // ignore
     }
-    return [makeMsg("Bot", buildWelcomeMessage(initialName, ""))];
+    return [makeMsg("Bot", buildIntakeNextStep({ questionAsked: null }, initialName, "").text)];
   });
   const [question, setQuestion] = useState("");
   const [downloading, setDownloading] = useState(false);
@@ -148,6 +139,40 @@ export default function App() {
   const [tokenInfo, setTokenInfo] = useState({ contextTokens: 0, responseTokens: 0, totalTokens: 0 });
   const [showTokenDetails, setShowTokenDetails] = useState(false);
 
+  /**
+   * Arma un prefijo corto para el system prompt que resume el contexto de
+   * intake acumulado antes de que el modelo cargue. Solo se usa en la
+   * primera respuesta del modelo (handoff). Mantiene al modelo al tanto
+   * del nombre y motivo del cliente sin filtrar la mecánica del intake.
+   */
+  const buildIntakeHandoffHint = useCallback((intakeState) => {
+    const parts = [];
+    if (intakeState.name) parts.push(`el cliente se llama ${intakeState.name}`);
+    if (intakeState.topic) parts.push(`su motivo de consulta es: ${intakeState.topic}`);
+    if (!parts.length) return "";
+    return `Contexto previo: ${parts.join("; ")}.`;
+  }, []);
+
+  // Estado del flujo de intake conversacional que el bot mantiene con el
+  // cliente mientras el modelo de IA se carga en segundo plano. La idea:
+  // que el cliente no note que hay un modelo cargando, solo que el bot le
+  // va haciendo preguntas naturales (nombre, motivo de consulta, etc.)
+  // hasta que el modelo está listo para responder con todo el contexto.
+  //
+  // Forma: { questionAsked: "greeting"|"topic"|"clarify"|null,
+  //          name: string|null, topic: string|null,
+  //          realQuestion: string|null }
+  // - questionAsked: lo último que el bot preguntó (para saber qué respondió el cliente).
+  // - realQuestion: si el cliente escribió su consulta real durante el
+  //   intake, se guarda acá para que el modelo la responda apenas cargue.
+  // - name/topic: datos del cliente que se relevan durante el intake.
+  const intakeRef = useRef({ questionAsked: null, name: null, topic: null, realQuestion: null });
+  const [intake, setIntake] = useState({ questionAsked: null, name: null, topic: null, realQuestion: null });
+  const intakeReset = useCallback(() => {
+    intakeRef.current = { questionAsked: null, name: null, topic: null, realQuestion: null };
+    setIntake({ questionAsked: null, name: null, topic: null, realQuestion: null });
+  }, []);
+
   // Ref for the composer wrapper (used when fixing the composer over mobile keyboard)
   const composerWrapperRef = useRef(null);
   const messagesScrollRef = useRef(null); // Scroll container de la lista de mensajes
@@ -174,19 +199,22 @@ export default function App() {
     setTokenInfo(tokens);
   }, [question, config, chatHistory]);
 
-  // Refresca el primer mensaje (bienvenida) cuando el usuario cambia el
-  // nombre del asistente en Configuración o cuando finalmente carga el JSON
-  // del negocio (que puede aportar `local.nombre`). No toca el resto del chat.
+  // Refresca el primer mensaje (bienvenida = primer paso de intake) cuando
+  // el usuario cambia el nombre del asistente o cuando finalmente carga el
+  // JSON del negocio (que puede aportar `local.nombre`). No toca el resto
+  // del chat.
   useEffect(() => {
-    const newWelcome = buildWelcomeMessage(
+    const firstStep = buildIntakeNextStep(
+      { questionAsked: null },
       config.assistantName,
       extractBusinessName(config.businessInfo)
     );
+    if (!firstStep) return;
     setMessages((prev) => {
       if (!prev.length) return prev;
       if (prev[0].author !== "Bot") return prev;
-      if (prev[0].text === newWelcome) return prev;
-      return [{ ...prev[0], text: newWelcome }, ...prev.slice(1)];
+      if (prev[0].text === firstStep.text) return prev;
+      return [{ ...prev[0], text: firstStep.text }, ...prev.slice(1)];
     });
   }, [config.assistantName, config.businessInfo]);
 
@@ -406,7 +434,7 @@ export default function App() {
     processingRef.current = true;
 
     while (pendingQueueRef.current.length > 0) {
-      const { question: q, botMsgId } = pendingQueueRef.current.shift();
+      const { question: q, botMsgId, internalHint } = pendingQueueRef.current.shift();
       setBusy(true);
       updateMsg(botMsgId, { text: "", pending: false, streaming: true });
 
@@ -429,8 +457,18 @@ export default function App() {
           computeHistoryBudget(configRef.current)
         );
 
+        // Si este turno es el "handoff" del intake (el primero que ve el
+        // modelo tras cargar), le prefijo al system prompt un resumen del
+        // contexto acumulado (nombre, motivo). Solo este turno; el resto
+        // de la conversación fluye normal.
+        const baseSystemPrompt = configRef.current.systemPrompt;
+        const systemPrompt = internalHint
+          ? `${internalHint}\n\n${baseSystemPrompt}`
+          : baseSystemPrompt;
+
         const config = {
           ...configRef.current,
+          systemPrompt,
           chatHistory: memoryContext,
           additionalContexts: [...staticContexts, ...allDynamicContexts],
         };
@@ -559,19 +597,23 @@ export default function App() {
       setDownloading(true);
       setDownloadPct(null);
       setError("");
-      setMessages([
-        makeMsg(
-          "Bot",
-          buildWelcomeMessage(
-            configRef.current.assistantName,
-            extractBusinessName(configRef.current.businessInfo)
-          )
-        ),
-        makeMsg(
-          "Bot",
-          "Estoy preparando la IA en tu dispositivo (la descarga se hace una sola vez). Mientras tanto respondo al instante las preguntas frecuentes de abajo."
-        ),
-      ]);
+      // El primer mensaje del chat es directamente la primera pregunta del
+      // intake. No hay un "mensaje de bienvenida" separado porque la
+      // bienvenida Y la primera pregunta están combinadas en el primer
+      // paso de intake (buildIntakeNextStep devuelve el saludo + "¿cómo
+      // te llamás?" en un solo mensaje). Así el cliente no nota que hay
+      // un modelo cargando — solo ve al bot haciendo preguntas naturales.
+      const firstStep = buildIntakeNextStep(
+        intakeRef.current,
+        configRef.current.assistantName,
+        extractBusinessName(configRef.current.businessInfo)
+      );
+      intakeRef.current = { ...intakeRef.current, questionAsked: firstStep?.kind || null };
+      setIntake({ ...intakeRef.current });
+
+      if (firstStep) {
+        setMessages([makeMsg("Bot", firstStep.text)]);
+      }
 
       const previousModelId = activeModelIdRef.current;
       await releaseCurrentEngine();
@@ -642,10 +684,41 @@ export default function App() {
         setIsFirstBootstrap(false);
         setSettingsOpen(false);
       }
-      setMessages((current) => [
-        ...current,
-        makeMsg("Bot", "¡Listo! Ya puedo responder cualquier consulta sobre Café Central."),
-      ]);
+
+      // Si el cliente ya escribió su consulta real durante el intake (o
+      // llegamos al final del flujo), armamos un primer turno que el
+      // modelo contesta con todo el contexto acumulado. NO emitimos el
+      // mensaje "¡Listo!" — el cliente no nota que el modelo recién carga.
+      const accumulated = intakeRef.current;
+      if (accumulated.realQuestion || (accumulated.name && accumulated.topic)) {
+        const visible = accumulated.realQuestion || accumulated.topic;
+        const internalHint = buildIntakeHandoffHint(accumulated);
+        const botMsgId = newId();
+        // Si el cliente no había escrito su pregunta real, el "Cliente" que
+        // se muestra en el chat es el topic (ej: "Quiero saber el horario").
+        // Si sí la había escrito, ese mensaje ya está visible en el chat —
+        // no lo duplicamos.
+        if (!accumulated.realQuestion) {
+          setMessages((current) => [
+            ...current,
+            makeMsg("Cliente", visible),
+            makeMsg("Bot", "...", { id: botMsgId, pending: true }),
+          ]);
+        } else {
+          setMessages((current) => [
+            ...current,
+            makeMsg("Bot", "...", { id: botMsgId, pending: true }),
+          ]);
+        }
+        pendingQueueRef.current.push({
+          question: visible,
+          botMsgId,
+          internalHint,
+        });
+        intakeRef.current = { ...accumulated, realQuestion: null };
+        setIntake(intakeRef.current);
+      }
+
       processQueue();
     }
 
@@ -673,7 +746,14 @@ export default function App() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // submitQuestion handles both quick (text-search) and queued (model) paths.
+  // submitQuestion maneja tres casos:
+  //   1) Modelo listo → flujo normal (queue → stream).
+  //   2) Modelo cargando + el cliente responde al intake → actualizar el
+  //      state de intake, mostrar su mensaje, y disparar la próxima
+  //      pregunta de intake (o esperar al cliente).
+  //   3) Modelo cargando + el cliente escribe su consulta real → guardar
+  //      la consulta y mostrar el mensaje. NO usamos quickLookup: el
+  //      modelo, que tiene más contexto, será quien responda apenas cargue.
   function submitQuestion(text) {
     const cleanQuestion = text.trim();
     if (!cleanQuestion) return;
@@ -681,38 +761,75 @@ export default function App() {
     setQuestion("");
     setError("");
 
-    // Quick lookup is a fallback only while the model is not loaded: it keeps
-    // the chat useful during download/failure, but once the engine is ready
-    // every question goes to the model.
-    if (!engineRef.current && configRef.current.businessInfo) {
-      const quick = quickLookup(configRef.current.businessInfo, cleanQuestion);
-      if (quick) {
-        setMessages((current) => [
-          ...current,
-          makeMsg("Cliente", cleanQuestion),
-          makeMsg("Bot", quick),
-        ]);
-        // Las respuestas instantáneas también alimentan la memoria.
-        recordInteraction(cleanQuestion, quick);
-        return;
-      }
-    }
-
-    // No model loaded and none on the way: surface the configuration flow.
-    if (!engineRef.current && !downloading) {
-      handleMissingModelWarning();
+    // ── Caso 1: modelo listo ──
+    if (engineRef.current) {
+      const botMsgId = newId();
+      setMessages((current) => [
+        ...current,
+        makeMsg("Cliente", cleanQuestion),
+        { id: botMsgId, author: "Bot", text: "...", pending: true },
+      ]);
+      pendingQueueRef.current.push({ question: cleanQuestion, botMsgId });
+      processQueue();
       return;
     }
 
-    const botMsgId = newId();
-    setMessages((current) => [
-      ...current,
-      makeMsg("Cliente", cleanQuestion),
-      { id: botMsgId, author: "Bot", text: "...", pending: true },
-    ]);
+    // ── Caso 2/3: modelo cargando. Estamos en modo intake. ──
+    if (downloading) {
+      // Actualizar el state de intake con la respuesta del cliente.
+      const prev = intakeRef.current;
+      const next = { ...prev };
 
-    pendingQueueRef.current.push({ question: cleanQuestion, botMsgId });
-    processQueue();
+      if (prev.questionAsked === "greeting") {
+        next.name = cleanQuestion.split(/\s+/)[0] || cleanQuestion;
+        next.questionAsked = "topic";
+      } else if (prev.questionAsked === "topic") {
+        next.topic = cleanQuestion;
+        next.questionAsked = null; // listo para que el cliente escriba la consulta real
+      } else if (prev.questionAsked === "clarify") {
+        next.topic = [prev.topic, cleanQuestion].filter(Boolean).join(" — ");
+        next.questionAsked = null;
+      } else {
+        // El cliente escribió sin que le preguntáramos nada (caso raro
+        // donde la primera pregunta aún no se hizo). Lo tomamos como
+        // motivo de consulta.
+        if (!next.name) {
+          next.name = cleanQuestion.split(/\s+/)[0] || cleanQuestion;
+        } else if (!next.topic) {
+          next.topic = cleanQuestion;
+        } else {
+          // Ya tenemos nombre y motivo → esta es la consulta real.
+          next.realQuestion = cleanQuestion;
+        }
+      }
+
+      intakeRef.current = next;
+      setIntake(next);
+
+      // Mostrar el mensaje del cliente en el chat.
+      setMessages((current) => [...current, makeMsg("Cliente", cleanQuestion)]);
+
+      // Decidir próxima pregunta de intake. Si la próxima pregunta es
+      // null, el cliente está escribiendo su consulta real y esperamos.
+      const nextStep = buildIntakeNextStep(
+        next,
+        configRef.current.assistantName,
+        extractBusinessName(configRef.current.businessInfo)
+      );
+      if (nextStep) {
+        // Pequeño delay (250ms) para que el cliente vea su mensaje antes
+        // de la respuesta — se siente más natural.
+        setTimeout(() => {
+          intakeRef.current = { ...intakeRef.current, questionAsked: nextStep.kind };
+          setIntake(intakeRef.current);
+          setMessages((current) => [...current, makeMsg("Bot", nextStep.text)]);
+        }, 250);
+      }
+      return;
+    }
+
+    // ── Caso 4: ni modelo ni descarga en curso (raro: error o race) ──
+    handleMissingModelWarning();
   }
 
   function handleSubmit(event) {
@@ -845,12 +962,9 @@ export default function App() {
                 </Typography>
               </Stack>
               <Stack direction="row" spacing={0.5} alignItems="center" sx={{ flexShrink: 0 }}>
-                <StatusPanel
-                  downloading={downloading}
-                  downloadPct={downloadPct}
-                  modelLabel={loadingModelInfo?.label}
-                  modelSize={loadingModelInfo?.size}
-                />
+                {/* StatusPanel eliminado del header: el cliente no debe notar
+                    que se está cargando un modelo. Si la carga falla, el error
+                    se muestra inline en el chat. Mientras carga, silencio total. */}
                 <Tooltip title="Configuración">
                   <IconButton
                     size="small"
