@@ -8,6 +8,19 @@
  * historial y respuesta dentro de ventanas chicas (2048).
  */
 
+/**
+ * Cap duro al tamaño del bloque «Información del negocio» que se inyecta al
+ * modelo. Es independiente del `maxTokens` que pasa el llamador: aunque el
+ * presupuesto disponible sea mayor, nunca dejamos que el bloque del negocio
+ * exceda este tope. Lo usamos para que el contexto del sistema se mantenga
+ * por debajo del 50% de la ventana del modelo (con system + history + pregunta
+ * + respuesta) en cualquier device.
+ *
+ * Valor actual: 800 tokens (≈3.200 caracteres). Si en el futuro querés
+ * ajustar el límite, este es el único lugar que hay que tocar.
+ */
+export const BUSINESS_INFO_TOKEN_CAP = 800;
+
 function estimateTokens(text) {
   if (!text) return 0;
   // ~1 token cada 4 caracteres en español (misma heurística que chatbot.js).
@@ -108,6 +121,12 @@ export function selectRelevantBusinessInfo(businessInfo, question, maxTokens = 1
   const raw = (businessInfo || "").trim();
   if (!raw) return "";
 
+  // Cap duro: el bloque del negocio nunca excede BUSINESS_INFO_TOKEN_CAP,
+  // sin importar el `maxTokens` que pase el llamador. Esto garantiza que
+  // el contexto del sistema se mantenga acotado y no se coma más del 50%
+  // de la ventana del modelo (con system prompt + history + pregunta + respuesta).
+  const effectiveBudget = Math.min(maxTokens, BUSINESS_INFO_TOKEN_CAP);
+
   let data;
   try {
     data = JSON.parse(raw);
@@ -116,7 +135,7 @@ export function selectRelevantBusinessInfo(businessInfo, question, maxTokens = 1
   }
 
   if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return truncateAtBoundary(raw, maxTokens);
+    return truncateAtBoundary(raw, effectiveBudget);
   }
 
   const matched = matchBusinessSections(question);
@@ -141,7 +160,7 @@ export function selectRelevantBusinessInfo(businessInfo, question, maxTokens = 1
 
     const chunk = JSON.stringify(data[key]);
     const cost = estimateTokens(`"${key}":,`) + estimateTokens(chunk);
-    if (usedTokens + cost > maxTokens) continue;
+    if (usedTokens + cost > effectiveBudget) continue;
 
     selected[key] = data[key];
     usedTokens += cost;
@@ -150,7 +169,7 @@ export function selectRelevantBusinessInfo(businessInfo, question, maxTokens = 1
   // Presupuesto demasiado chico hasta para `local`: degradar a texto truncado
   // antes que mandar un contexto vacío.
   if (Object.keys(selected).length === 0) {
-    return truncateAtBoundary(JSON.stringify(data.local ?? data), maxTokens);
+    return truncateAtBoundary(JSON.stringify(data.local ?? data), effectiveBudget);
   }
 
   return JSON.stringify(selected);

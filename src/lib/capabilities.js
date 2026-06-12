@@ -155,6 +155,14 @@ export function getRecommendedSettings(browserSupport) {
     };
   }
 
+  if (capabilities.estimatedMemoryGB >= 8) {
+    return {
+      modelId: MODEL_ID,
+      fallbackModelIds: [...DEFAULT_FALLBACK_MODEL_IDS],
+      contextWindowSize: 8192,
+    };
+  }
+
   return {
     modelId: MODEL_ID,
     fallbackModelIds: [...DEFAULT_FALLBACK_MODEL_IDS],

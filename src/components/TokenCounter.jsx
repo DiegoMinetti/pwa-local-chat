@@ -3,6 +3,7 @@ import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 
 export default function TokenCounter({ contextTokens, responseTokens, totalTokens, maxTokens }) {
   const tokenPercentage = maxTokens ? Math.round((totalTokens / maxTokens) * 100) : 0;
+  const isOverHalf = tokenPercentage > 50;
   const isNearLimit = tokenPercentage > 80;
   const isOverLimit = tokenPercentage > 100;
   const saturated = isOverLimit;
@@ -16,14 +17,14 @@ export default function TokenCounter({ contextTokens, responseTokens, totalToken
         p: 1.25,
         bgcolor: saturated
           ? "error.lighter"
-          : isNearLimit
+          : isOverHalf
           ? "warning.lighter"
           : "info.lighter",
         borderRadius: 2,
         border: "1px solid",
         borderColor: saturated
           ? "error.light"
-          : isNearLimit
+          : isOverHalf
           ? "warning.light"
           : "info.light",
       }}
@@ -82,7 +83,7 @@ export default function TokenCounter({ contextTokens, responseTokens, totalToken
           <Typography
             variant="caption"
             fontWeight={700}
-            color={saturated ? "error.main" : isNearLimit ? "warning.main" : "text.primary"}
+            color={saturated ? "error.main" : isOverHalf ? "warning.main" : "text.primary"}
           >
             {totalTokens.toLocaleString("es")} / {maxTokens.toLocaleString("es")}
           </Typography>
@@ -104,7 +105,7 @@ export default function TokenCounter({ contextTokens, responseTokens, totalToken
           <Typography
             variant="caption"
             fontWeight={700}
-            color={saturated ? "error.main" : isNearLimit ? "warning.main" : "text.primary"}
+            color={saturated ? "error.main" : isOverHalf ? "warning.main" : "text.primary"}
           >
             {tokenPercentage}%
           </Typography>
@@ -115,7 +116,7 @@ export default function TokenCounter({ contextTokens, responseTokens, totalToken
       <LinearProgress
         variant="determinate"
         value={clampedPct}
-        color={saturated ? "error" : isNearLimit ? "warning" : "primary"}
+        color={saturated ? "error" : isOverHalf ? "warning" : "primary"}
         sx={{ height: 4, borderRadius: 999 }}
       />
       {saturated && (
@@ -129,6 +130,11 @@ export default function TokenCounter({ contextTokens, responseTokens, totalToken
       {!saturated && isNearLimit && (
         <Typography variant="caption" color="warning.main" fontWeight={500}>
           Contexto casi lleno ({tokenPercentage}%). Se comprimirá automáticamente si se desborda.
+        </Typography>
+      )}
+      {!saturated && isOverHalf && !isNearLimit && (
+        <Typography variant="caption" color="warning.main" fontWeight={500}>
+          Contexto usando más del 50% de la ventana ({tokenPercentage}%). Las respuestas pueden perder contexto previo si seguimos así.
         </Typography>
       )}
     </Stack>

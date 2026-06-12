@@ -103,10 +103,20 @@ describe("getRecommendedSettings", () => {
     expect(result.contextWindowSize).toBe(2048);
   });
 
-  it("desktop con WebGPU y memoria: modelo principal 1.5B", () => {
+  it("desktop con WebGPU y mucha memoria (>= 8GB): ventana 8192", () => {
     const result = getRecommendedSettings({
       runtimeSupport: { webgpu: true, wasm: true },
       deviceCapabilities: { isMobile: false, estimatedMemoryGB: 8 },
+    });
+
+    expect(result.modelId).toBe("Qwen2.5-1.5B-Instruct-q4f16_1-MLC");
+    expect(result.contextWindowSize).toBe(8192);
+  });
+
+  it("desktop con WebGPU y memoria media (4-7GB): ventana 4096", () => {
+    const result = getRecommendedSettings({
+      runtimeSupport: { webgpu: true, wasm: true },
+      deviceCapabilities: { isMobile: false, estimatedMemoryGB: 5 },
     });
 
     expect(result.modelId).toBe("Qwen2.5-1.5B-Instruct-q4f16_1-MLC");

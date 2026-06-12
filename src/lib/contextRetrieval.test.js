@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { matchBusinessSections, selectRelevantBusinessInfo } from "./contextRetrieval";
+import {
+  BUSINESS_INFO_TOKEN_CAP,
+  matchBusinessSections,
+  selectRelevantBusinessInfo,
+} from "./contextRetrieval";
 
 const BUSINESS_DOC = JSON.stringify({
   metadata: { version: "1.0", descripcion_dataset: "interno" },
@@ -70,16 +74,22 @@ describe("selectRelevantBusinessInfo", () => {
     expect(result.intenciones_soportadas).toBeUndefined();
   });
 
-  it("sin match usa el set por defecto y completa con el resto si hay presupuesto", () => {
+  it("sin match usa el set por defecto (local, horarios, servicios, sucursales, faq)", () => {
     const result = JSON.parse(
-      selectRelevantBusinessInfo(BUSINESS_DOC, "una consulta cualquiera", 5000)
+      selectRelevantBusinessInfo(BUSINESS_DOC, "una consulta cualquiera", BUSINESS_INFO_TOKEN_CAP)
     );
 
     expect(result.local).toBeDefined();
     expect(result.horarios).toBeDefined();
     expect(result.servicios).toBeDefined();
     expect(result.faq).toBeDefined();
-    expect(result.menu).toBeDefined();
+  });
+
+  it("cap el bloque del negocio a BUSINESS_INFO_TOKEN_CAP aunque el llamador pida más", () => {
+    // El llamador pide 5000 tokens; el cap duro es 800 → el resultado no puede excederlo.
+    const result = selectRelevantBusinessInfo(BUSINESS_DOC, "una consulta cualquiera", 5000);
+    const tokens = Math.ceil(result.length / 4);
+    expect(tokens).toBeLessThanOrEqual(BUSINESS_INFO_TOKEN_CAP);
   });
 
   it("respeta el presupuesto de tokens", () => {
