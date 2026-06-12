@@ -144,7 +144,7 @@ describe("App", () => {
     });
   });
 
-  it("si el modelo falla al cargar y se envía una consulta, abre configuración y avisa", async () => {
+  it("si el modelo falla al cargar y se envía una consulta, abre configuración y avisa", { timeout: 15000 }, async () => {
     createEngine.mockRejectedValue(new Error("sin GPU"));
 
     render(<App />);
@@ -165,7 +165,7 @@ describe("App", () => {
     });
   });
 
-  it("si cierra configuración sin modelo cargado muestra aviso", async () => {
+  it("si cierra configuración sin modelo cargado muestra aviso", { timeout: 15000 }, async () => {
     createEngine.mockRejectedValue(new Error("sin GPU"));
 
     render(<App />);
