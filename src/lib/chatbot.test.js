@@ -11,6 +11,8 @@ import {
   SUGGESTED_QUESTIONS,
   SYSTEM_PROMPT,
   buildMessages,
+  buildSystemPrompt,
+  DEFAULT_ASSISTANT_NAME,
   computeHistoryBudget,
   createEngine,
   getAssistantReply,
@@ -33,7 +35,7 @@ describe("chatbot helpers", () => {
 
     expect(messages).toHaveLength(2);
     expect(messages[0].content).toContain(SYSTEM_PROMPT);
-    expect(messages[0].content).toContain("tono amable, formal y respetuoso");
+    expect(messages[0].content).toContain("cálido, amable y proactivo");
     // El bloque «Información actual» se inyecta en el user message.
     expect(messages[1].content).toContain("Información del negocio");
     expect(messages[1].content).toContain("Información actual");
@@ -41,6 +43,26 @@ describe("chatbot helpers", () => {
     expect(messages[1].content).toMatch(/hora \d{2}:\d{2}/);
     expect(messages[1].content).toContain("Horario: 8 a 18");
     expect(messages[1].content).toContain("Pregunta: Cual es el horario?");
+  });
+
+  it("buildSystemPrompt incluye el nombre del asistente y las reglas cálidas/proactivas", () => {
+    const prompt = buildSystemPrompt("Martina");
+    expect(prompt).toContain("Martina");
+    expect(prompt).toContain("cálido, amable y proactivo");
+    expect(prompt).toContain("ya te averiguo");
+    expect(prompt).toMatch(/voseo|vos/i);
+  });
+
+  it("buildSystemPrompt cae al default si el nombre es vacío", () => {
+    const prompt = buildSystemPrompt("   ");
+    expect(prompt).toContain(DEFAULT_ASSISTANT_NAME);
+  });
+
+  it("quickLookup usa el assistantName configurable en el saludo", () => {
+    const info = JSON.stringify({ local: { nombre: "Cafe X" } });
+    const reply = quickLookup(info, "hola", { assistantName: "Lucía" });
+    expect(reply).toContain("Lucía");
+    expect(reply).toContain("Cafe X");
   });
 
   it("buildMessages sin businessInfo no rompe y marca el bloque como vacío", () => {
