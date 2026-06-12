@@ -146,6 +146,17 @@ export default function SettingsPanel({
     draft.modelId !== config.modelId ||
     draft.contextWindowSize !== config.contextWindowSize;
 
+  // MUI Select renderiza el menu en un portal en document.body con un
+  // stacking context propio (zIndex.modal ≈ 1300). Como el Drawer está en
+  // zIndex.modal+20 (1320), el menu queda visualmente debajo del Paper del
+  // Drawer. Forzamos disablePortal para que el menu viva dentro del subtree
+  // del Drawer y le subimos el zIndex explícitamente para que se vea por
+  // encima del Paper y del backdrop.
+  const selectMenuProps = {
+    disablePortal: true,
+    sx: { zIndex: (theme) => theme.zIndex.modal + 30 },
+  };
+
   return (
     <Drawer
       anchor="right"
@@ -346,6 +357,7 @@ export default function SettingsPanel({
                     <Select
                       label="Modelo de IA"
                       value={draft.modelId}
+                      MenuProps={selectMenuProps}
                       onChange={(e) => {
                         const nextModelId = e.target.value;
                         setDraft((current) => ({
@@ -388,6 +400,7 @@ export default function SettingsPanel({
                       multiple
                       label="Fallback automático"
                       value={draft.fallbackModelIds || []}
+                      MenuProps={selectMenuProps}
                       onChange={(e) => set("fallbackModelIds", e.target.value)}
                       renderValue={(selected) => {
                         if (!selected.length) return "Sin fallback";
@@ -692,6 +705,7 @@ export default function SettingsPanel({
                     <Select
                       label="Ventana de contexto"
                       value={draft.contextWindowSize}
+                      MenuProps={selectMenuProps}
                       onChange={(e) => set("contextWindowSize", e.target.value)}
                     >
                       {[2048, 4096, 8192].map((n) => (
