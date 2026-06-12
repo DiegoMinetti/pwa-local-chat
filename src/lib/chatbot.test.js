@@ -35,22 +35,28 @@ describe("chatbot helpers", () => {
 
     expect(messages).toHaveLength(2);
     expect(messages[0].content).toContain(SYSTEM_PROMPT);
-    expect(messages[0].content).toContain("cálido, amable y proactivo");
     // El bloque «Información actual» se inyecta en el user message.
     expect(messages[1].content).toContain("Información del negocio");
+    expect(messages[1].content).toContain("ÚNICA fuente de datos");
     expect(messages[1].content).toContain("Información actual");
     expect(messages[1].content).toMatch(/hoy es \w+/);
     expect(messages[1].content).toMatch(/hora \d{2}:\d{2}/);
     expect(messages[1].content).toContain("Horario: 8 a 18");
-    expect(messages[1].content).toContain("Pregunta: Cual es el horario?");
+    expect(messages[1].content).toContain("Pregunta del cliente: Cual es el horario?");
+    // Orden: datos del negocio ANTES que la pregunta.
+    const idxDatos = messages[1].content.indexOf("Información del negocio");
+    const idxPregunta = messages[1].content.indexOf("Pregunta del cliente");
+    expect(idxDatos).toBeLessThan(idxPregunta);
   });
 
-  it("buildSystemPrompt incluye el nombre del asistente y las reglas cálidas/proactivas", () => {
+  it("buildSystemPrompt incluye el nombre con regla dura de identidad", () => {
     const prompt = buildSystemPrompt("Martina");
-    expect(prompt).toContain("Martina");
+    expect(prompt).toContain("Tu nombre es Martina");
+    expect(prompt).toContain('"Me llamo Martina"');
     expect(prompt).toContain("cálido, amable y proactivo");
     expect(prompt).toContain("ya te averiguo");
     expect(prompt).toMatch(/voseo|vos/i);
+    expect(prompt).toContain("ÚNICA fuente de datos");
   });
 
   it("buildSystemPrompt cae al default si el nombre es vacío", () => {

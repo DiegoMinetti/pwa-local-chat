@@ -12,7 +12,7 @@ function isScrolledToBottom(el, threshold = STICKY_BOTTOM_THRESHOLD) {
   return el.scrollHeight - el.clientHeight - el.scrollTop <= threshold;
 }
 
-export default function MessageList({ messages, scrollRef }) {
+export default function MessageList({ messages, scrollRef, assistantName = "Asistente" }) {
   const endRef = useRef(null);
   // Intención del usuario: ¿quiere seguir pegado al fondo? Solo cambia por
   // acciones del usuario (scrollear hacia arriba lo despega, volver al fondo
@@ -138,7 +138,7 @@ export default function MessageList({ messages, scrollRef }) {
                   fontWeight={600}
                   sx={{ display: "block", mb: 0.25, opacity: 0.55 }}
                 >
-                  Asistente
+                  {assistantName}
                 </Typography>
               )}
               {showDots ? (

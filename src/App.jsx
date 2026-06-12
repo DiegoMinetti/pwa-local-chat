@@ -24,6 +24,7 @@ import StatusPanel from "./components/StatusPanel";
 import TokenCounter from "./components/TokenCounter";
 import { assessBrowserSupport, getModelCompatibility, getRecommendedSettings } from "./lib/capabilities";
 import {
+  DEFAULT_ASSISTANT_NAME,
   DEFAULT_CONFIG,
   calculateMessagesTokens,
   computeHistoryBudget,
@@ -45,7 +46,35 @@ const newId = () => String(nextId++);
 
 const CONFIG_STORAGE_KEY = 'cafe-central-config';
 const NO_MODEL_WARNING = "El asistente con IA no está disponible en este momento. Igual puedo responder al instante las preguntas frecuentes, o podés revisar la Configuración.";
-const WELCOME_MESSAGE = "¡Hola! Soy el asistente de Café Central. ¿En qué puedo ayudarte?";
+
+/**
+ * Mensaje de bienvenida. Se construye en runtime (no como constante) para que
+ * respete el `assistantName` configurado por el usuario y el nombre del
+ * negocio que venga en el JSON (`local.nombre`). Si el JSON todavía no
+ * cargó, usa un genérico.
+ */
+function buildWelcomeMessage(assistantName, businessName) {
+  const name = (assistantName || DEFAULT_ASSISTANT_NAME).trim() || DEFAULT_ASSISTANT_NAME;
+  const biz = (businessName || "").trim();
+  const where = biz ? ` del equipo de ${biz}` : "";
+  return `¡Hola! Soy ${name}${where}. ¿En qué te puedo ayudar?`;
+}
+
+/**
+ * Extrae `local.nombre` del JSON del negocio. Devuelve "" si el documento
+ * no es JSON o si la sección no existe. Se usa solo para el saludo del
+ * mensaje de bienvenida (la respuesta a preguntas concretas sigue
+ * pasando por `quickLookup` + el modelo).
+ */
+function extractBusinessName(businessInfo) {
+  if (!businessInfo) return "";
+  try {
+    const data = JSON.parse(businessInfo);
+    return data?.local?.nombre || "";
+  } catch {
+    return "";
+  }
+}
 
 function makeMsg(author, text, extra = {}) {
   return { id: newId(), author, text, ...extra };
@@ -58,7 +87,22 @@ export default function App() {
   const processingRef = useRef(false);
   const inputRef = useRef(null); // Chat input reference for global keyboard capture
 
-  const [messages, setMessages] = useState([makeMsg("Bot", WELCOME_MESSAGE)]);
+  const [messages, setMessages] = useState(() => {
+    // Mensaje inicial: usa el nombre del assistantName que ya esté en
+    // localStorage (si hay config previa) o el default. Se reescribe apenas
+    // se carga el JSON del negocio.
+    let initialName = DEFAULT_ASSISTANT_NAME;
+    try {
+      const saved = localStorage.getItem(CONFIG_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.assistantName) initialName = parsed.assistantName;
+      }
+    } catch {
+      // ignore
+    }
+    return [makeMsg("Bot", buildWelcomeMessage(initialName, ""))];
+  });
   const [question, setQuestion] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [downloadPct, setDownloadPct] = useState(null);
@@ -500,7 +544,13 @@ export default function App() {
       setDownloadPct(null);
       setError("");
       setMessages([
-        makeMsg("Bot", WELCOME_MESSAGE),
+        makeMsg(
+          "Bot",
+          buildWelcomeMessage(
+            configRef.current.assistantName,
+            extractBusinessName(configRef.current.businessInfo)
+          )
+        ),
         makeMsg(
           "Bot",
           "Estoy preparando la IA en tu dispositivo (la descarga se hace una sola vez). Mientras tanto respondo al instante las preguntas frecuentes de abajo."
@@ -870,7 +920,11 @@ export default function App() {
                 </AccordionDetails>
               </Accordion>
             )}
-            <MessageList messages={messages} scrollRef={messagesScrollRef} />
+            <MessageList
+              messages={messages}
+              scrollRef={messagesScrollRef}
+              assistantName={config.assistantName || DEFAULT_ASSISTANT_NAME}
+            />
           </Box>
 
           {/* Composer */}
