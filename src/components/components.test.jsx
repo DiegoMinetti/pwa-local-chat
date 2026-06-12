@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import { appTheme } from "../theme";
 import ChatComposer from "./ChatComposer";
@@ -224,5 +224,183 @@ describe("ChatComposer — M3 styling", () => {
 
     // useEffect setea ref.current al <textarea> interno tras montar.
     expect(ref.current).not.toBeNull();
+  });
+});
+
+describe("MessageList — sticky scroll behavior", () => {
+  // Helper: simula un contenedor scrolleable con altura finita y posición
+  // programable. jsdom no scrollea pero podemos setear scrollTop y
+  // scrollHeight directamente.
+  function makeScrollContainer() {
+    const el = document.createElement("div");
+    el.style.overflowY = "auto";
+    // Defaults que el componente puede leer.
+    Object.defineProperty(el, "scrollTop", { value: 0, writable: true, configurable: true });
+    Object.defineProperty(el, "scrollHeight", { value: 1000, configurable: true, writable: true });
+    Object.defineProperty(el, "clientHeight", { value: 200, configurable: true });
+    document.body.appendChild(el);
+    return el;
+  }
+
+  function setScrollPosition(el, scrollTop, scrollHeight = el.scrollHeight) {
+    // Truco: en jsdom no podemos cambiar scrollTop directamente; redefinimos.
+    Object.defineProperty(el, "scrollTop", { value: scrollTop, configurable: true, writable: true });
+    Object.defineProperty(el, "scrollHeight", { value: scrollHeight, configurable: true });
+  }
+
+  function isAtBottom(el) {
+    return el.scrollHeight - el.clientHeight - el.scrollTop <= 40;
+  }
+
+  it("scrollea al fondo cuando el usuario ya estaba al fondo", () => {
+    const container = makeScrollContainer();
+    // Posición inicial: al fondo (scrollHeight - clientHeight = 800, scrollTop=800).
+    setScrollPosition(container, 800, 1000);
+    const ref = { current: container };
+
+    const { rerender } = renderWithTheme(
+      <MessageList messages={[{ id: "1", author: "Bot", text: "Hola" }]} scrollRef={ref} />
+    );
+
+    // Sin botón visible (estamos al fondo).
+    expect(screen.queryByRole("button", { name: /bajar a la última respuesta/i })).toBeNull();
+
+    // Append de un nuevo mensaje mientras seguís al fondo.
+    rerender(
+      <ThemeProvider theme={appTheme}>
+        <MessageList
+          messages={[
+            { id: "1", author: "Bot", text: "Hola" },
+            { id: "2", author: "Bot", text: "¿En qué te ayudo?" },
+          ]}
+          scrollRef={ref}
+        />
+      </ThemeProvider>
+    );
+
+    // Sigue sin botón: el componente scrolleó al fondo.
+    expect(screen.queryByRole("button", { name: /bajar a la última respuesta/i })).toBeNull();
+  });
+
+  it("muestra el botón «nueva respuesta abajo» cuando el usuario está leyendo arriba", () => {
+    const container = makeScrollContainer();
+    // Posición inicial: arriba (scrollTop = 0, lejos del fondo).
+    setScrollPosition(container, 0, 1000);
+    const ref = { current: container };
+
+    const { rerender } = renderWithTheme(
+      <MessageList messages={[{ id: "1", author: "Bot", text: "Hola" }]} scrollRef={ref} />
+    );
+
+    rerender(
+      <ThemeProvider theme={appTheme}>
+        <MessageList
+          messages={[
+            { id: "1", author: "Bot", text: "Hola" },
+            { id: "2", author: "Bot", text: "Respuesta nueva" },
+          ]}
+          scrollRef={ref}
+        />
+      </ThemeProvider>
+    );
+
+    // Aparece el botón flotante.
+    expect(screen.getByRole("button", { name: /bajar a la última respuesta/i })).toBeInTheDocument();
+  });
+
+  it("oculta el botón cuando el usuario scrollea al fondo manualmente", () => {
+    const container = makeScrollContainer();
+    setScrollPosition(container, 0, 1000);
+    const ref = { current: container };
+
+    const { rerender } = renderWithTheme(
+      <MessageList messages={[{ id: "1", author: "Bot", text: "Hola" }]} scrollRef={ref} />
+    );
+
+    rerender(
+      <ThemeProvider theme={appTheme}>
+        <MessageList
+          messages={[
+            { id: "1", author: "Bot", text: "Hola" },
+            { id: "2", author: "Bot", text: "Nueva" },
+          ]}
+          scrollRef={ref}
+        />
+      </ThemeProvider>
+    );
+
+    const button = screen.getByRole("button", { name: /bajar a la última respuesta/i });
+    expect(button).toBeInTheDocument();
+
+    // Simulamos scroll al fondo: el contenedor está en bottom, dispatch scroll.
+    setScrollPosition(container, 800, 1000);
+    act(() => {
+      container.dispatchEvent(new Event("scroll"));
+    });
+
+    expect(screen.queryByRole("button", { name: /bajar a la última respuesta/i })).toBeNull();
+
+    // Cleanup
+    document.body.removeChild(container);
+  });
+
+  it("el botón al hacer click scrollea al fondo y se oculta", () => {
+    const container = makeScrollContainer();
+    setScrollPosition(container, 0, 1000);
+    const ref = { current: container };
+
+    const scrollIntoViewSpy = vi.fn();
+    // Reemplazamos scrollIntoView del elemento endRef.
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollIntoViewSpy;
+
+    try {
+      const { rerender } = renderWithTheme(
+        <MessageList messages={[{ id: "1", author: "Bot", text: "Hola" }]} scrollRef={ref} />
+      );
+
+      rerender(
+        <ThemeProvider theme={appTheme}>
+          <MessageList
+            messages={[
+              { id: "1", author: "Bot", text: "Hola" },
+              { id: "2", author: "Bot", text: "Nueva" },
+            ]}
+            scrollRef={ref}
+          />
+        </ThemeProvider>
+      );
+
+      const button = screen.getByRole("button", { name: /bajar a la última respuesta/i });
+      fireEvent.click(button);
+
+      expect(scrollIntoViewSpy).toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: /bajar a la última respuesta/i })).toBeNull();
+    } finally {
+      HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+      document.body.removeChild(container);
+    }
+  });
+
+  it("no scrollea si el contenedor no se pasa (compatibilidad)", () => {
+    // Sin scrollRef el componente debe renderizar sin romper y el botón
+    // nunca aparece (no hay forma de saber si está al fondo).
+    const { rerender } = renderWithTheme(
+      <MessageList messages={[{ id: "1", author: "Bot", text: "Hola" }]} />
+    );
+
+    rerender(
+      <ThemeProvider theme={appTheme}>
+        <MessageList
+          messages={[
+            { id: "1", author: "Bot", text: "Hola" },
+            { id: "2", author: "Bot", text: "Nueva" },
+          ]}
+        />
+      </ThemeProvider>
+    );
+
+    // Sin scrollRef asumimos isAtBottom=true → no muestra el botón.
+    expect(screen.queryByRole("button", { name: /bajar a la última respuesta/i })).toBeNull();
   });
 });

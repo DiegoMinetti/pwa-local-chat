@@ -97,6 +97,7 @@ export default function App() {
 
   // Ref for the composer wrapper (used when fixing the composer over mobile keyboard)
   const composerWrapperRef = useRef(null);
+  const messagesScrollRef = useRef(null); // Scroll container de la lista de mensajes
 
   // Always-current config ref — lets callbacks read latest config without stale closures.
   const configRef = useRef(DEFAULT_CONFIG);
@@ -781,6 +782,7 @@ export default function App() {
 
           {/* Scrollable messages */}
           <Box
+            ref={messagesScrollRef}
             sx={{
               flex: 1,
               minHeight: 0,
@@ -820,7 +822,7 @@ export default function App() {
                 </AccordionDetails>
               </Accordion>
             )}
-            <MessageList messages={messages} />
+            <MessageList messages={messages} scrollRef={messagesScrollRef} />
           </Box>
 
           {/* Composer */}
