@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import { Box, ButtonBase, Paper, Typography } from "@mui/material";
 import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 
@@ -14,71 +14,86 @@ function isScrolledToBottom(el, threshold = STICKY_BOTTOM_THRESHOLD) {
 
 export default function MessageList({ messages, scrollRef }) {
   const endRef = useRef(null);
-  // Track de la posición del usuario antes de cada cambio de mensajes.
-  // Se actualiza en cada `useEffect` con el valor leído del contenedor
-  // scrolleable antes del render. El siguiente render consume esa lectura.
-  const wasAtBottomRef = useRef(true);
+  // Intención del usuario: ¿quiere seguir pegado al fondo? Solo cambia por
+  // acciones del usuario (scrollear hacia arriba lo despega, volver al fondo
+  // lo vuelve a pegar). NO se recalcula leyendo la posición tras cada token:
+  // durante el streaming la posición queda transitoriamente atrasada respecto
+  // del contenido nuevo y esa lectura daba falsos "no está al fondo".
+  const stickToBottomRef = useRef(true);
+  // Última posición conocida, para distinguir scroll hacia arriba (usuario
+  // leyendo) de eventos de scroll generados por el propio auto-scroll.
+  const lastScrollTopRef = useRef(0);
+  const isFirstRenderRef = useRef(true);
   const [hasNewBelow, setHasNewBelow] = useState(false);
 
-  // Sincroniza el flag de "abajo" con el scroll del contenedor. Se dispara
-  // también en resize, focus del input, y cuando el contenido cambia de
-  // tamaño (ResizeObserver sobre el sentinel `endRef`).
-  const updateStickyState = useCallback(() => {
+  const pinToBottom = useCallback(() => {
+    const el = scrollRef?.current;
+    if (!el) return;
+    // Scroll instantáneo (no smooth): durante el streaming llegan tokens más
+    // rápido de lo que dura una animación; encadenar scrolls suaves los
+    // interrumpe entre sí y el seguimiento se traba, sobre todo en móvil.
+    el.scrollTop = el.scrollHeight;
+    lastScrollTopRef.current = el.scrollTop;
+  }, [scrollRef]);
+
+  // Scroll del contenedor: si el usuario vuelve al fondo se re-engancha el
+  // seguimiento; si scrollea hacia arriba se desengancha.
+  const handleScroll = useCallback(() => {
     const el = scrollRef?.current;
     if (!el) return;
     if (isScrolledToBottom(el)) {
-      // Si llega al fondo solo, también limpiamos el aviso.
+      stickToBottomRef.current = true;
       setHasNewBelow(false);
+    } else if (el.scrollTop < lastScrollTopRef.current) {
+      stickToBottomRef.current = false;
     }
+    lastScrollTopRef.current = el.scrollTop;
   }, [scrollRef]);
 
   useEffect(() => {
     const el = scrollRef?.current;
     if (!el) return;
-    el.addEventListener("scroll", updateStickyState, { passive: true });
+    el.addEventListener("scroll", handleScroll, { passive: true });
     // ResizeObserver para cuando el alto del contenedor cambia (teclado
-    // móvil, rotación, mensaje nuevo que aumenta scrollHeight).
+    // móvil, rotación): si el usuario seguía el chat, re-pegamos al fondo.
     let ro;
     if (typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(updateStickyState);
+      ro = new ResizeObserver(() => {
+        if (stickToBottomRef.current) {
+          pinToBottom();
+        }
+      });
       ro.observe(el);
     }
     return () => {
-      el.removeEventListener("scroll", updateStickyState);
+      el.removeEventListener("scroll", handleScroll);
       ro?.disconnect();
     };
-  }, [scrollRef, updateStickyState]);
+  }, [scrollRef, handleScroll, pinToBottom]);
 
-  // Cada vez que cambian los mensajes: si el usuario estaba al fondo,
-  // scrollear al final. Si NO estaba al fondo, mostrar el aviso.
-  useEffect(() => {
+  // Cada vez que cambian los mensajes: si el usuario sigue el chat, pegamos
+  // al fondo de forma síncrona (layout effect = antes del paint, sin saltos).
+  // Si está leyendo más arriba, mostramos el aviso sin moverlo.
+  useLayoutEffect(() => {
     const el = scrollRef?.current;
-    if (!el || !endRef.current) return;
-
-    if (wasAtBottomRef.current) {
-      // Sticky bottom: el usuario está siguiendo el chat, scrolleo suave.
-      // requestAnimationFrame evita el "salto" cuando el DOM aún no terminó
-      // de mutar (los nuevos mensajes todavía no tienen altura final).
-      requestAnimationFrame(() => {
-        endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-        setHasNewBelow(false);
-      });
+    if (isFirstRenderRef.current) {
+      isFirstRenderRef.current = false;
+      // Estado inicial: respetar la posición con la que llegó el contenedor.
+      stickToBottomRef.current = isScrolledToBottom(el);
+      if (el && stickToBottomRef.current) pinToBottom();
+      return;
+    }
+    if (!el) return;
+    if (stickToBottomRef.current) {
+      pinToBottom();
+      setHasNewBelow(false);
     } else {
-      // El usuario está leyendo más arriba: NO lo movemos. Marcamos el aviso.
       setHasNewBelow(true);
     }
-  }, [messages, scrollRef]);
-
-  // Antes de cada cambio, capturamos si el usuario estaba al fondo. Esto
-  // se ejecuta como effect de "limpieza" del render anterior, justo antes
-  // de que el próximo setMessages pinte el cambio. Usamos un layout effect
-  // para leer el estado del DOM después del commit anterior.
-  useEffect(() => {
-    const el = scrollRef?.current;
-    wasAtBottomRef.current = isScrolledToBottom(el);
-  });
+  }, [messages, scrollRef, pinToBottom]);
 
   const scrollToBottom = useCallback(() => {
+    stickToBottomRef.current = true;
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     setHasNewBelow(false);
   }, []);

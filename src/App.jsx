@@ -615,9 +615,10 @@ export default function App() {
     setQuestion("");
     setError("");
 
-    // Instant path first: keyword lookup on the business document answers the
-    // most common questions immediately, with zero tokens and zero invention.
-    if (configRef.current.businessInfo) {
+    // Quick lookup is a fallback only while the model is not loaded: it keeps
+    // the chat useful during download/failure, but once the engine is ready
+    // every question goes to the model.
+    if (!engineRef.current && configRef.current.businessInfo) {
       const quick = quickLookup(configRef.current.businessInfo, cleanQuestion);
       if (quick) {
         setMessages((current) => [
@@ -831,6 +832,9 @@ export default function App() {
               flex: 1,
               minHeight: 0,
               overflowY: "auto",
+              // El seguimiento del chat se maneja a mano en MessageList; el
+              // scroll anchoring nativo compite con ese ajuste y causa saltos.
+              overflowAnchor: "none",
               px: { xs: 1, md: 2 },
               pb: {
                 xs: "calc(var(--composer-height, 96px) + env(safe-area-inset-bottom, 0px))",

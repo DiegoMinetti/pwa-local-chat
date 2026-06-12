@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi, afterEach } from "vitest";
 import App from "./App";
 
@@ -61,6 +61,7 @@ describe("App", () => {
   });
 
   afterEach(() => {
+    cleanup();
     localStorage.clear();
   });
 
@@ -105,7 +106,34 @@ describe("App", () => {
     expect(streamAssistantReply).toHaveBeenCalled();
   });
 
-  it("responde al instante con quickLookup sin usar el modelo", async () => {
+  it("responde con quickLookup cuando el modelo no está cargado", { timeout: 15000 }, async () => {
+    createEngine.mockRejectedValue(new Error("sin GPU"));
+    loadBusinessDocument.mockResolvedValue(
+      JSON.stringify({
+        local: { nombre: "Café Central", telefono: "+54 11 4567 8899" },
+        horarios: { regular: { lunes: "08:00 - 20:00" } },
+      })
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/error de inicialización/i).length).toBeGreaterThan(0);
+    });
+
+    fireEvent.change(screen.getAllByLabelText(/pregunta del cliente/i).at(-1), {
+      target: { value: "¿Cuál es el teléfono?" }
+    });
+
+    fireEvent.click(screen.getAllByRole("button", { name: /enviar/i }).at(-1));
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/\+54 11 4567 8899/).length).toBeGreaterThan(0);
+    });
+    expect(streamAssistantReply).not.toHaveBeenCalled();
+  });
+
+  it("con el modelo cargado responde el modelo aunque exista respuesta rápida", async () => {
     loadBusinessDocument.mockResolvedValue(
       JSON.stringify({
         local: { nombre: "Café Central", telefono: "+54 11 4567 8899" },
@@ -126,9 +154,9 @@ describe("App", () => {
     fireEvent.click(screen.getAllByRole("button", { name: /enviar/i }).at(-1));
 
     await waitFor(() => {
-      expect(screen.getAllByText(/\+54 11 4567 8899/).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/abrimos a las 8/i).length).toBeGreaterThan(0);
     });
-    expect(streamAssistantReply).not.toHaveBeenCalled();
+    expect(streamAssistantReply).toHaveBeenCalled();
   });
 
   it("muestra errores de inicialización", async () => {
