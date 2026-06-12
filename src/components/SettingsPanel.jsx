@@ -127,6 +127,7 @@ export default function SettingsPanel({
       anchor="right"
       open={open}
       onClose={onClose}
+      sx={{ zIndex: (theme) => theme.zIndex.modal + 20 }}
       PaperProps={{
         sx: { width: { xs: "100%", sm: 400 }, display: "flex", flexDirection: "column" },
       }}
